@@ -603,23 +603,16 @@ pub fn paint_cover_px(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: 
         icon_at(ui, rect.center(), icon::MUSIC, rect.width() * 0.3, theme::text_faint());
         return;
     };
-    let mut uv = t.square_uv();
-    if zoom > 1.0 {
-        // Zoom by cropping the UV rect: stays inside the rounded corners.
-        let c = uv.center();
-        let half = uv.size() / (2.0 * zoom);
-        uv = Rect::from_center_size(c, half * 2.0);
-    }
     let url = steady_url(ui.ctx(), &t.url, px);
-    paint_remote(ui, &url, rect, radius, uv, Color32::WHITE);
+    paint_remote_square(ui, &url, rect, radius, zoom, Color32::WHITE);
     // A video's thumbnail is listed at most 480 tall, a square of 480 from it: a bigger
     // cover gets YouTube's 720 one once it's there.
     if px > t.height
         && let Some(big) = crate::model::ytimg_max(&t.url)
     {
-        // Always 16:9, whatever shape the listed one was.
-        let wide = Thumb { url: String::new(), width: 1280, height: 720 }.square_uv();
-        paint_when_ready(ui, &big, rect, radius, if zoom > 1.0 { Rect::from_center_size(wide.center(), wide.size() / zoom) } else { wide });
+        if matches!(egui::Image::new(big.as_str()).load_for_size(ui.ctx(), rect.size()), Ok(egui::load::TexturePoll::Ready { .. })) {
+            paint_remote_square(ui, &big, rect, radius, zoom, Color32::WHITE);
+        }
     }
 }
 
@@ -638,7 +631,8 @@ pub fn paint_cover_corners(ui: &Ui, rect: Rect, thumbs: &[Thumb], corners: Corne
     let Some(t) = pick_thumb(thumbs, px.min(544)) else { return };
     let url = steady_url(ui.ctx(), &t.url, px);
     if let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(url).load_for_size(ui.ctx(), rect.size()) {
-        egui::Image::from_texture(texture).uv(t.square_uv()).corner_radius(corners).paint_at(ui, rect);
+        let uv = crate::model::square_uv_for(texture.size.x, texture.size.y);
+        egui::Image::from_texture(texture).uv(uv).corner_radius(corners).paint_at(ui, rect);
     }
 }
 
@@ -672,7 +666,8 @@ pub fn paint_disc(ui: &Ui, center: Pos2, r: f32, thumbs: &[Thumb], angle: f32, t
     let url = steady_url(ui.ctx(), &t.url, px);
     // While it loads, the loader wakes the UI once it's ready.
     let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(url).load_for_size(ui.ctx(), Vec2::splat(r * 2.0)) else { return };
-    paint_disc_mesh(ui, center, r, texture.id, t.square_uv(), angle, tint);
+    let uv = crate::model::square_uv_for(texture.size.x, texture.size.y);
+    paint_disc_mesh(ui, center, r, texture.id, uv, angle, tint);
 }
 
 /// Any texture (e.g. a live music video frame) centre-cropped to a square and painted as
@@ -752,6 +747,9 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, pin: Option<bool>, a
     }
     if cl.image_outline > 0.0 {
         ui.painter().rect_stroke(img, radius, egui::Stroke::new(1.0, theme::glass(cl.image_outline)), egui::StrokeKind::Inside);
+    }
+    if !c.round && matches!(&c.target, Target::Song(t) if t.has_video()) {
+        paint_video_badge(ui, img.left_top() + vec2(8.0, 8.0));
     }
     // Play button rises into the corner on hover; on the playing item it stays up
     // and shows pause.
@@ -1354,6 +1352,8 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         } else if h > 0.0 {
             ui.painter().rect_filled(img, tr, theme::shade(rl.image_dim * h));
             play_triangle(ui, img.center(), 7.0, theme::with_alpha(Color32::WHITE, h));
+        } else if t.has_video() {
+            paint_video_badge_mini(ui, img.right_bottom() - vec2(3.0, 3.0));
         }
         x += rl.thumb_px + 14.0;
     }
@@ -1585,6 +1585,70 @@ pub fn shimmer_band(ui: &Ui, r: Rect, radius: f32, time: f64) {
 
 /// Paint a remote image into `rect`: the skeleton's shimmer while it downloads (not
 /// egui's spinner), then a quick fade-in. One already loaded just shows.
+/// Compact dark translucent "VIDEO" badge with play glyph for card corners.
+fn paint_video_badge(ui: &Ui, pos: Pos2) {
+    let g = ui.painter().layout_no_wrap("VIDEO".to_owned(), theme::semibold(9.5), Color32::WHITE);
+    let pill = Rect::from_min_size(pos, vec2(g.size().x + 21.0, (g.size().y + 6.0).max(18.0)));
+    let p = ui.painter();
+    p.rect_filled(pill, 5.0, Color32::from_rgba_unmultiplied(10, 10, 14, 198));
+    p.rect_stroke(pill, 5.0, egui::Stroke::new(0.8, Color32::from_white_alpha(42)), egui::StrokeKind::Inside);
+    play_triangle(ui, pos2(pill.left() + 8.5, pill.center().y), 3.4, Color32::WHITE);
+    p.galley(pos2(pill.left() + 15.0, pill.center().y - g.size().y / 2.0), g, Color32::WHITE);
+}
+
+/// Tiny "MV" corner badge on small song-row thumbnails.
+fn paint_video_badge_mini(ui: &Ui, bottom_right: Pos2) {
+    let g = ui.painter().layout_no_wrap("MV".to_owned(), theme::semibold(8.0), Color32::WHITE);
+    let size = vec2(g.size().x + 6.0, (g.size().y + 2.0).max(12.0));
+    let pill = Rect::from_min_size(bottom_right - size, size);
+    let p = ui.painter();
+    p.rect_filled(pill, 3.0, Color32::from_rgba_unmultiplied(10, 10, 14, 210));
+    p.rect_stroke(pill, 3.0, egui::Stroke::new(0.6, Color32::from_white_alpha(45)), egui::StrokeKind::Inside);
+    p.galley(pill.center() - g.size() / 2.0, g, Color32::WHITE);
+}
+
+/// Like [`paint_remote`], but centre-crops from the loaded texture's actual pixel dimensions
+/// (plus optional `zoom`) so widescreen/letterboxed video thumbnails never stretch into squares.
+fn paint_remote_square(ui: &Ui, url: &str, rect: Rect, radius: f32, zoom: f32, tint: Color32) {
+    const FADE: f64 = 0.22;
+    let ctx = ui.ctx();
+    let now = ctx.input(|i| i.time);
+    let id = egui::Id::unique(("img-fade", url));
+    match egui::Image::new(url).load_for_size(ctx, rect.size()) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            let a = match ctx.data(|d| d.get_temp::<Option<f64>>(id)) {
+                Some(Some(t0)) if now - t0 < FADE => ((now - t0) / FADE) as f32,
+                Some(None) => {
+                    ctx.data_mut(|d| d.insert_temp(id, Some(now)));
+                    0.0
+                }
+                _ => 1.0,
+            };
+            if a < 1.0 {
+                ctx.request_repaint();
+            }
+            let mut uv = crate::model::square_uv_for(texture.size.x, texture.size.y);
+            if zoom > 1.0 {
+                let c = uv.center();
+                let half = uv.size() / (2.0 * zoom);
+                uv = Rect::from_center_size(c, half * 2.0);
+            }
+            let tint = tint.gamma_multiply(theme::ease_out(a));
+            if crate::preset::active().app.squircle && radius >= 6.0 {
+                paint_squircle_image(ui, texture.id, rect, radius, uv, tint);
+            } else {
+                egui::Image::from_texture(texture).uv(uv).corner_radius(CornerRadius::same(radius as u8)).tint(tint).paint_at(ui, rect);
+            }
+        }
+        Ok(egui::load::TexturePoll::Pending { .. }) => {
+            ctx.data_mut(|d| d.insert_temp::<Option<f64>>(id, None));
+            shimmer_band(ui, rect, radius, now);
+            ctx.request_repaint_after(std::time::Duration::from_millis(66));
+        }
+        Err(_) => {}
+    }
+}
+
 pub fn paint_remote(ui: &Ui, url: &str, rect: Rect, radius: f32, uv: Rect, tint: Color32) {
     const FADE: f64 = 0.22;
     let ctx = ui.ctx();

@@ -512,6 +512,10 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
             }
         });
     }
+    let mood_selected = app.home.as_ref().is_some_and(|h| h.chips.iter().any(|c| c.selected));
+    if !mood_selected {
+        played_lately_shelf(app, ui);
+    }
     // A refresh keeps showing the current feed; the skeleton is only for an empty one.
     if app.home.as_ref().is_none_or(|h| app.home_loading && h.shelves.is_empty()) {
         placeholder(app, ui, now, 3, CARD);
@@ -553,6 +557,45 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
     if loading_more {
         widgets::skeleton(ui, now, 1, CARD);
     }
+}
+
+/// Real-time "Played lately" shelf at the top of Home: shows the currently playing song
+/// immediately plus recent unique listens synced with NabyTune's `listens.jsonl`, with a
+/// manual reload button beside the scroll arrows.
+fn played_lately_shelf(app: &mut App, ui: &mut Ui) {
+    let cards = app.played_lately_cards(20);
+    if cards.is_empty() {
+        return;
+    }
+    let look = &crate::preset::active().app;
+    let (mut left, mut right, mut reload) = (false, false, false);
+    ui.add_space(22.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Played lately")
+                .font(theme::weighted(look.heading_weight, look.heading_px))
+                .extra_letter_spacing(look.heading_tracking_em * look.heading_px)
+                .color(theme::text()),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let turn = crate::preset::active().app.controls.arrow_hover;
+            right = widgets::icon_button_turning(ui, icon::CHEVRON_RIGHT, 18.0, "Scroll Played lately right", false, turn).clicked();
+            left = widgets::icon_button_turning(ui, icon::CHEVRON_LEFT, 18.0, "Scroll Played lately left", false, turn).clicked();
+            reload = super::shell::refresh_button_with(ui, 15.0, "Reload played lately", "Reload played lately (F5)").clicked();
+        });
+    });
+    ui.add_space(12.0);
+    if reload {
+        app.stats_sync_check(true);
+    }
+    let nudge = right as i32 - left as i32;
+    h_scroll(ui, "home-played-lately", nudge, cards.len(), CARD, 18.0, |ui| {
+        ui.spacing_mut().item_spacing.x = 18.0;
+        for c in &cards {
+            let is_liked = matches!(&c.target, Target::Song(t) if app.liked.contains(&t.id));
+            card(ui, c, CARD, is_liked, None, &mut app.actions);
+        }
+    });
 }
 
 /// Cards scrolling sideways under a shelf's title.

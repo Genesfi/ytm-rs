@@ -1217,7 +1217,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.page == Page::Stats {
+        if matches!(self.page, Page::Stats | Page::Home) {
             self.stats_sync_check(true);
         }
         let changed = self.page_changed;
@@ -1247,9 +1247,14 @@ impl App {
         }
         let req = match &self.page.clone() {
             Page::Home if !self.home_loading => {
+                self.stats_sync_check(false);
                 self.home_loading = true;
                 self.home_mood = false;
                 Some(Req::Home(None))
+            }
+            Page::Home => {
+                self.stats_sync_check(false);
+                None
             }
             Page::Explore => Some(Req::Explore(self.preferred_artist_ids())),
             Page::Mood(p) if self.mood.as_ref().is_none_or(|m| &m.params != p) => Some(Req::Mood(p.clone())),

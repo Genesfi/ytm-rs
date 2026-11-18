@@ -626,10 +626,14 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
 /// Round button with a clockwise arrow, drawn like the icon font's (Lucide's rotate-cw),
 /// which the bundled subset doesn't have.
 fn refresh_button(ui: &mut Ui) -> egui::Response {
-    const SIZE: f32 = 18.0;
-    let d = SIZE + 18.0;
+    refresh_button_with(ui, 18.0, "Refresh", "Refresh (F5)")
+}
+
+/// Same clockwise-arrow reload button, sized and labelled by the caller.
+pub(super) fn refresh_button_with(ui: &mut Ui, size: f32, name: &str, tooltip: &str) -> egui::Response {
+    let d = size + 18.0;
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(d), Sense::click());
-    let resp = named(resp, "Refresh").on_hover_text("Refresh (F5)").on_hover_cursor(egui::CursorIcon::PointingHand);
+    let resp = named(resp, name).on_hover_text(tooltip).on_hover_cursor(egui::CursorIcon::PointingHand);
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
     if h > 0.0 {
         ui.painter().circle_filled(rect.center(), d / 2.0, theme::glass(0.10 * h));
@@ -637,7 +641,7 @@ fn refresh_button(ui: &mut Ui) -> egui::Response {
     let color = theme::lerp_color(theme::text_dim(), theme::text(), h);
     let press = if resp.is_pointer_button_down_on() { 0.9 } else { 1.0 };
     // On Lucide's 24-unit grid, centred on (12, 12).
-    let unit = SIZE * press / 24.0;
+    let unit = size * press / 24.0;
     let at = |x: f32, y: f32| rect.center() + vec2(x - 12.0, y - 12.0) * unit;
     let stroke = egui::Stroke::new(2.0 * unit, color);
     // A circle of radius 9 from three o'clock round to the top right, then on to the arrow.

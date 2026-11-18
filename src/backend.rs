@@ -1162,15 +1162,35 @@ impl Backend {
                     // song itself. The lookup is shared with its play's (one per video).
                     let song = self.song_version(&seed, song_of.as_ref(), PREFETCH_SONG_WAIT).await;
                     let from = song.as_ref().map_or(&seed, |s| &s.id);
-                    let mut tracks = ytm::radio(api, from, false, 50).await?;
-                    // The radio starts with its seed, which is playing already.
-                    tracks.retain(|t| t.id != *from);
-                    // Some places get an empty radio signed out; the account's own may not be.
-                    if tracks.is_empty() && me {
-                        log::info!("radio for {from}: none signed out; asking signed in");
-                        tracks = ytm::radio(api, from, true, 50).await?;
-                        tracks.retain(|t| t.id != *from);
-                    }
+                    // Prefer the signed-in account's personalised radio (as music.youtube.com
+                    // does) so autoplay matches the listener's taste instead of falling back to
+                    // generic global tracks; fall back to signed-out only if empty or unavailable.
+                    const RADIO_LIMIT: usize = 25;
+                    let tracks = if me {
+                        match ytm::radio(api, from, true, RADIO_LIMIT).await {
+                            Ok(mut t) => {
+                                t.retain(|x| x.id != *from);
+                                if t.is_empty() {
+                                    log::info!("radio for {from}: none signed in; falling back to signed out");
+                                    let mut alt = ytm::radio(api, from, false, RADIO_LIMIT).await?;
+                                    alt.retain(|x| x.id != *from);
+                                    alt
+                                } else {
+                                    t
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("radio for {from}: signed-in failed ({e:#}); falling back to signed out");
+                                let mut alt = ytm::radio(api, from, false, RADIO_LIMIT).await?;
+                                alt.retain(|x| x.id != *from);
+                                alt
+                            }
+                        }
+                    } else {
+                        let mut t = ytm::radio(api, from, false, RADIO_LIMIT).await?;
+                        t.retain(|x| x.id != *from);
+                        t
+                    };
                     log::info!("radio for {from}: {} songs", tracks.len());
                     Resp::Radio { seed, tracks }
                 }

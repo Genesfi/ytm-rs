@@ -18,7 +18,7 @@ use super::shell::vgradient;
 use super::widgets::{self, icon_at, named, paint_remote, pill, song_menu, text_at};
 use super::{Action, App, Page};
 use crate::backend;
-use crate::model::{Link, Thumb, Track, sized};
+use crate::model::{Card, Link, Target, Thumb, Track, sized};
 use crate::stats::{self, ArtistStat, FileStamp, Hidden, Listen, Period, SongStat, Span, Summary};
 use crate::theme::{self, icon};
 
@@ -272,13 +272,16 @@ impl App {
             ctx.request_repaint();
         }
 
-        // While viewing Stats, periodically check if NabyTune updated the shared files.
-        if self.page == Page::Stats {
+        // While viewing Stats or Home ("Played lately"), periodically check if NabyTune
+        // updated the shared files so recent history stays in sync in real time.
+        if matches!(self.page, Page::Stats | Page::Home) {
             let due = self.stats.last_sync_check.is_none_or(|t| t.elapsed() >= Duration::from_secs(3));
             if due {
                 self.stats_sync_check(false);
             }
-            ctx.request_repaint_after(Duration::from_secs(3));
+            if !self.window_hidden {
+                ctx.request_repaint_after(Duration::from_secs(3));
+            }
         }
     }
 
@@ -339,6 +342,80 @@ impl App {
             *slot.lock().unwrap() = Some(LoadedPayload { listens, hidden, log_stamp, hidden_stamp });
             backend.wake();
         });
+    }
+
+    /// Most recently played unique songs for the Home "Played lately" shelf: the currently
+    /// playing track immediately at the front, followed by shared listening history in reverse
+    /// chronological order (auto-synced with NabyTune's `listens.jsonl`).
+    pub(super) fn played_lately_cards(&self, limit: usize) -> Vec<Card> {
+        let mut cards = Vec::with_capacity(limit);
+        let mut seen = std::collections::HashSet::with_capacity(limit);
+
+        if let Some(track) = self.current().or_else(|| self.heard_song())
+            && !track.id.is_empty()
+            && !self.stats.hidden.hides_song(&track.id)
+            && !(self.hide_explicit && track.explicit)
+            && seen.insert(track.id.clone())
+        {
+            cards.push(Card {
+                title: track.title.clone(),
+                subtitle: track.artist_line(),
+                thumbs: track.thumbs.clone(),
+                target: Target::Song(track.clone()),
+                round: false,
+                links: track.artists.clone(),
+            });
+        }
+
+        if let Some(listens) = &self.stats.listens {
+            for l in listens.iter().rev() {
+                if cards.len() >= limit {
+                    break;
+                }
+                if l.video_id.is_empty()
+                    || l.title.is_empty()
+                    || self.stats.hidden.hides(l)
+                    || !seen.insert(l.video_id.clone())
+                {
+                    continue;
+                }
+                let is_yt_video = l.thumbnail.as_deref().is_some_and(|u| u.contains("i.ytimg.com"));
+                let thumbs = match &l.thumbnail {
+                    Some(url) if !url.is_empty() => vec![Thumb {
+                        url: sized(url, 544),
+                        width: if is_yt_video { 480 } else { 544 },
+                        height: if is_yt_video { 360 } else { 544 },
+                    }],
+                    _ => vec![Thumb { url: format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", l.video_id), width: 480, height: 360 }],
+                };
+                let artists = if l.artist.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Link { name: l.artist.clone(), id: None }]
+                };
+                let album = (!l.album.is_empty()).then(|| Link { name: l.album.clone(), id: None });
+                let track = Track {
+                    id: l.video_id.clone(),
+                    title: l.title.clone(),
+                    artists,
+                    album,
+                    duration: (l.length > 0).then_some(l.length),
+                    thumbs: thumbs.clone(),
+                    music_video: is_yt_video,
+                    video: is_yt_video,
+                    ..Default::default()
+                };
+                cards.push(Card {
+                    title: l.title.clone(),
+                    subtitle: l.artist.clone(),
+                    thumbs,
+                    target: Target::Song(track),
+                    round: false,
+                    links: Vec::new(),
+                });
+            }
+        }
+        cards
     }
 
     fn stats_summary(&mut self) -> (Rc<Summary>, Option<u64>, i64) {

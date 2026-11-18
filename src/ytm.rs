@@ -2021,6 +2021,9 @@ fn like_target(menu: &Value) -> Option<String> {
 
 /// A song in a radio / up-next panel.
 fn panel_item(r: &Value) -> Option<Track> {
+    if !r["unplayableText"].is_null() {
+        return None;
+    }
     let id = r["videoId"].as_str()?.to_owned();
     let title = text(&r["title"])?;
     let byline = &r["longBylineText"];

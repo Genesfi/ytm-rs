@@ -11,18 +11,28 @@ impl Thumb {
     /// UV rect that shows a centred square of this image, trimming the letterboxing of
     /// 4:3 video thumbnails and the sides of 16:9 ones.
     pub fn square_uv(&self) -> egui::Rect {
-        use egui::{pos2, Rect};
-        let ratio = if self.height > 0 { self.width as f32 / self.height as f32 } else { 1.0 };
-        if ratio > 1.6 {
-            let w = 1.0 / ratio;
-            Rect::from_min_max(pos2(0.5 - w / 2.0, 0.0), pos2(0.5 + w / 2.0, 1.0))
-        } else if ratio > 1.2 {
-            // 16:9 picture inside a 4:3 frame: content is the middle 75% vertically.
-            let w = 0.75 / ratio;
-            Rect::from_min_max(pos2(0.5 - w / 2.0, 0.125), pos2(0.5 + w / 2.0, 0.875))
-        } else {
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
-        }
+        square_uv_for(self.width as f32, self.height as f32)
+    }
+}
+
+/// UV rect showing a centred square for any image of pixel size `(width, height)`, trimming
+/// black letterbox bars on 4:3 YouTube thumbnails (`hqdefault`/`sddefault`) and the wide or
+/// tall excess on non-square art so covers never appear squished.
+pub fn square_uv_for(width: f32, height: f32) -> egui::Rect {
+    use egui::{Rect, pos2};
+    let ratio = if height > 0.0 && width > 0.0 { width / height } else { 1.0 };
+    if ratio > 1.6 {
+        let w = 1.0 / ratio;
+        Rect::from_min_max(pos2(0.5 - w / 2.0, 0.0), pos2(0.5 + w / 2.0, 1.0))
+    } else if ratio > 1.2 {
+        // 16:9 picture inside a 4:3 frame: content is the middle 75% vertically.
+        let w = 0.75 / ratio;
+        Rect::from_min_max(pos2(0.5 - w / 2.0, 0.125), pos2(0.5 + w / 2.0, 0.875))
+    } else if ratio < 0.85 {
+        let h = ratio;
+        Rect::from_min_max(pos2(0.0, 0.5 - h / 2.0), pos2(1.0, 0.5 + h / 2.0))
+    } else {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
     }
 }
 
