@@ -672,9 +672,26 @@ pub fn paint_disc(ui: &Ui, center: Pos2, r: f32, thumbs: &[Thumb], angle: f32, t
     let url = steady_url(ui.ctx(), &t.url, px);
     // While it loads, the loader wakes the UI once it's ready.
     let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(url).load_for_size(ui.ctx(), Vec2::splat(r * 2.0)) else { return };
-    let uv = t.square_uv();
+    paint_disc_mesh(ui, center, r, texture.id, t.square_uv(), angle, tint);
+}
+
+/// Any texture (e.g. a live music video frame) centre-cropped to a square and painted as
+/// a smoothly anti-aliased rotating disc.
+pub fn paint_texture_disc(ui: &Ui, center: Pos2, r: f32, tex: egui::TextureId, tex_size: [usize; 2], angle: f32, tint: Color32) {
+    let (w, h) = (tex_size[0].max(1) as f32, tex_size[1].max(1) as f32);
+    let uv = if w >= h {
+        let half = (h / w) * 0.5;
+        Rect::from_min_max(pos2(0.5 - half, 0.0), pos2(0.5 + half, 1.0))
+    } else {
+        let half = (w / h) * 0.5;
+        Rect::from_min_max(pos2(0.0, 0.5 - half), pos2(1.0, 0.5 + half))
+    };
+    paint_disc_mesh(ui, center, r, tex, uv, angle, tint);
+}
+
+fn paint_disc_mesh(ui: &Ui, center: Pos2, r: f32, tex_id: egui::TextureId, uv: Rect, angle: f32, tint: Color32) {
     let (uc, uh) = (uv.center(), uv.width() / 2.0);
-    let mut mesh = egui::Mesh::with_texture(texture.id);
+    let mut mesh = egui::Mesh::with_texture(tex_id);
     mesh.vertices.push(egui::epaint::Vertex { pos: center, uv: uc, color: tint });
     let ppp = ui.ctx().pixels_per_point();
     // Enough sides that a big disc doesn't show them, and an edge that fades over about

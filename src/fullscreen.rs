@@ -147,11 +147,17 @@ mod imp {
     }
 
     pub fn set_window_shape(shape: Option<(i32, i32, i32, i32, i32)>) {
-        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+        use windows::Win32::Graphics::Gdi::{CreateEllipticRgn, CreateRoundRectRgn, SetWindowRgn};
         let Some(&h) = WINDOW.get() else { return };
         // SAFETY: the app's own window; once set, the system owns the region.
         unsafe {
-            let region = shape.map(|(left, top, right, bottom, d)| CreateRoundRectRgn(left, top, right + 1, bottom + 1, d, d));
+            let region = shape.map(|(left, top, right, bottom, d)| {
+                if d >= (right - left) && d >= (bottom - top) {
+                    CreateEllipticRgn(left, top, right + 1, bottom + 1)
+                } else {
+                    CreateRoundRectRgn(left, top, right + 1, bottom + 1, d, d)
+                }
+            });
             SetWindowRgn(HWND(h as *mut _), region, true);
         }
     }

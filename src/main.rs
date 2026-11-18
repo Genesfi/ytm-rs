@@ -140,8 +140,9 @@ fn main() -> eframe::Result {
         viewport = viewport.with_position([-4000.0, 0.0]).with_inner_size([1920.0, 1057.0]).with_active(false).with_taskbar(false);
     }
     let renderer = renderer::init(&data_dir());
-    // Both, so each settles this run's choice.
-    if backdrop::init(&data_dir(), renderer) | ui::init_pill(&data_dir(), renderer) {
+    // Both, so each settles this run's choice. On Windows OpenGL, keep the window
+    // see-through capable so circular vinyl PiP has transparent corners even without a material.
+    if backdrop::init(&data_dir(), renderer) | ui::init_pill(&data_dir(), renderer) | (cfg!(windows) && renderer == renderer::Renderer::OpenGl) {
         viewport = viewport.with_transparent(true);
     }
     let options = eframe::NativeOptions {

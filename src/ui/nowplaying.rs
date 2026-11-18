@@ -204,7 +204,7 @@ fn backdrop(app: &mut App, ui: &mut Ui, rect: Rect, clip: Rect, now: f64) {
 }
 
 /// Smooth per-frame bass-kick pulse (0..1) shared by Vinyl beat and Ambient beat.
-fn update_beat(app: &mut App, ctx: &egui::Context, now: f64) -> f32 {
+pub(super) fn update_beat(app: &mut App, ctx: &egui::Context, now: f64) -> f32 {
     let want = app.ambient_beat || (app.vinyl_beat && app.vinyl_mode);
     let dt = (now - app.beat_last_frame).clamp(0.0, 0.1) as f32;
     app.beat_last_frame = now;
@@ -221,8 +221,152 @@ fn update_beat(app: &mut App, ctx: &egui::Context, now: f64) -> f32 {
     app.beat_smooth
 }
 
+/// Advances the shared vinyl rotation angle smoothly and returns the current angle in radians.
+pub(super) fn tick_vinyl_angle(app: &mut App, ctx: &egui::Context, now: f64, spin_secs_fallback: f32, spin_when_paused: bool) -> f32 {
+    let last_id = egui::Id::unique("record-last-frame");
+    let should_spin = (!app.vinyl_mode || app.vinyl_rotate) && (app.playing() || spin_when_paused);
+    if should_spin {
+        // Real time since the last frame: egui's smoothed estimate makes uneven frames step.
+        let dt = (now - ctx.data(|d| d.get_temp::<f64>(last_id)).unwrap_or(now)).clamp(0.0, 0.1);
+        ctx.data_mut(|d| d.insert_temp(last_id, now));
+        let spin_secs = if app.vinyl_mode { app.vinyl_speed.clamp(1.8, 45.0) } else { spin_secs_fallback.max(4.0) };
+        app.record_angle = (app.record_angle + dt * std::f64::consts::TAU / spin_secs as f64) % std::f64::consts::TAU;
+        // High-cadence repaint for silky 60/75/120+ FPS disc rotation.
+        if !app.window_hidden {
+            super::pace::repaint_after(ctx, std::time::Duration::from_millis(8));
+        }
+    } else {
+        ctx.data_mut(|d| d.insert_temp(last_id, now));
+    }
+    app.record_angle as f32
+}
+
+/// Paints a spinning vinyl disc (wrapping either a live video texture or cover art) with a dark
+/// vinyl rim, frosted metallic silver center spindle, optional beat accent halo, and optional shadow.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint_vinyl_disc(
+    ui: &Ui,
+    center: egui::Pos2,
+    disc_r: f32,
+    thumbs: &[crate::model::Thumb],
+    video_tex: Option<&egui::TextureHandle>,
+    angle: f32,
+    tint: Color32,
+    px: u32,
+    rim_ratio: f32,
+    accent_halo: Option<(Color32, f32)>,
+    drop_shadow: bool,
+) {
+    if disc_r <= 2.0 {
+        return;
+    }
+    if drop_shadow {
+        widgets::disc_shadow(ui, center + vec2(0.0, (disc_r * 0.06).min(6.0)), disc_r, (disc_r * 0.36).clamp(8.0, 28.0), 0.55);
+    }
+    if let Some((accent, pulse)) = accent_halo {
+        let halo_r = disc_r * (1.18 + pulse * 0.22);
+        let halo_a = (0.08 + pulse * 0.36).min(0.46);
+        paint_radial_glow(ui.painter(), center, halo_r, accent, halo_a);
+    }
+    let p = ui.painter();
+    p.circle_filled(center, disc_r, Color32::from_rgb(14, 14, 18));
+    let outer_w = (disc_r * 0.03).clamp(0.8, 1.6);
+    p.circle_stroke(center, (disc_r - outer_w * 0.5).max(1.0), egui::Stroke::new(outer_w, Color32::from_rgba_unmultiplied(46, 46, 58, 255)));
+    if rim_ratio <= 0.93 && disc_r >= 24.0 {
+        // Subtle glossy vinyl grooves on the wider black vinyl rim (floating mini disc / mini player).
+        p.circle_stroke(center, disc_r * 0.962, egui::Stroke::new(0.9, Color32::from_rgba_unmultiplied(255, 255, 255, 24)));
+        p.circle_stroke(center, disc_r * 0.935, egui::Stroke::new(0.7, Color32::from_rgba_unmultiplied(255, 255, 255, 14)));
+    } else {
+        p.circle_stroke(center, disc_r * 0.984, egui::Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 255, 255, 22)));
+    }
+    let art_r = disc_r * rim_ratio;
+    match video_tex {
+        Some(tex) => widgets::paint_texture_disc(ui, center, art_r, tex.id(), tex.size(), angle, tint),
+        None => widgets::paint_disc(ui, center, art_r, thumbs, angle, tint, px),
+    }
+    let p = ui.painter();
+    p.circle_stroke(center, art_r, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 95)));
+    // Frosted metallic silver center spindle & dark spindle hole.
+    p.circle_filled(center, disc_r * 0.186, Color32::from_rgba_unmultiplied(0, 0, 0, 68));
+    p.circle_filled(center, disc_r * 0.172, Color32::from_rgba_unmultiplied(232, 235, 242, 236));
+    if disc_r >= 24.0 {
+        p.circle_stroke(center, disc_r * 0.140, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 92)));
+        p.circle_stroke(center, disc_r * 0.172, egui::Stroke::new((disc_r * 0.018).clamp(0.8, 1.4), Color32::from_rgba_unmultiplied(255, 255, 255, 215)));
+    }
+    p.circle_filled(center, (disc_r * 0.048).max(1.6), Color32::from_rgb(10, 10, 14));
+    if disc_r >= 24.0 {
+        p.circle_stroke(center, disc_r * 0.048, egui::Stroke::new(0.9, Color32::from_rgba_unmultiplied(255, 255, 255, 55)));
+    }
+}
+
+/// Floating mini spinning vinyl disc in the bottom-right corner above the player bar when Vinyl
+/// mode is enabled and Now Playing is closed (browsing Home, Explore, Library, etc.).
+pub fn floating_mini_vinyl(app: &mut App, ctx: &egui::Context, screen: Rect, queue_w: f32, np_anim: f32, now: f64) {
+    if !app.vinyl_mode || app.fullscreen || np_anim >= 0.98 {
+        return;
+    }
+    let Some(track) = app.current().cloned() else { return };
+    let vis = (1.0 - np_anim * 1.35).clamp(0.0, 1.0);
+    if vis <= 0.01 {
+        return;
+    }
+    let base_r = if screen.width() >= 760.0 && screen.height() >= 520.0 {
+        68.0
+    } else {
+        (screen.width().min(screen.height()) * 0.115).clamp(44.0, 64.0)
+    };
+    let bar_top = screen.bottom() - app.bar_height();
+    let right_edge = screen.right() - queue_w;
+    let center = pos2(right_edge - 22.0 - base_r, bar_top - 18.0 - base_r);
+    if center.x - base_r < screen.left() + 60.0 || center.y - base_r < screen.top() + 56.0 {
+        return;
+    }
+    let beat = update_beat(app, ctx, now);
+    let pulse = if app.vinyl_beat { beat } else { 0.0 };
+    let angle = tick_vinyl_angle(app, ctx, now, 22.0, false);
+    let on_circle = vis > 0.75 && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.distance(center) <= base_r * 1.06);
+    let hover_id = egui::Id::unique("home-mini-vinyl-hover");
+    let was_hovered = ctx.data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false);
+    let h = theme::anim_bool(ctx, hover_id.with("a"), on_circle && was_hovered, 0.14);
+    let disc_r = base_r * (0.85 + 0.15 * vis) * (1.0 + h * 0.045 + pulse * 0.055);
+    let hit_rect = Rect::from_center_size(center, Vec2::splat(base_r * 2.0));
+    let halo = (app.vinyl_beat && ((app.playing() && !app.buffering) || pulse > 0.002)).then_some((app.accent_color(), pulse));
+    let px = (base_r * 2.0 * ctx.pixels_per_point()).ceil() as u32;
+
+    egui::Area::new(egui::Id::unique("home-floating-vinyl"))
+        .order(egui::Order::Middle)
+        .fixed_pos(hit_rect.min)
+        .interactable(on_circle)
+        .show(ctx, |ui| {
+            ui.set_clip_rect(screen);
+            ui.multiply_opacity(vis);
+            let (_, resp) = ui.allocate_exact_size(hit_rect.size(), Sense::click());
+            let hovered = on_circle && resp.hovered();
+            ctx.data_mut(|d| d.insert_temp(hover_id, hovered));
+            let resp = named(resp, "Open Now Playing");
+            let resp = if hovered {
+                resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Open Now Playing · Right-click to play/pause")
+            } else {
+                resp
+            };
+            paint_vinyl_disc(ui, center, disc_r, &track.thumbs, None, angle, Color32::WHITE, px, 0.905, halo, true);
+            if h > 0.01 {
+                let p = ui.painter();
+                p.circle_filled(center, disc_r * 0.905, theme::shade(0.28 * h));
+                p.circle_filled(center, 18.0, theme::shade(0.58 * h));
+                widgets::icon_at(ui, center, icon::CHEVRON_UP, 18.0, Color32::WHITE.gamma_multiply(h));
+            }
+            if hovered && resp.clicked() {
+                app.actions.push(Action::OpenNowPlaying(true));
+            } else if hovered && resp.secondary_clicked() {
+                app.actions.push(Action::TogglePlay);
+            }
+        });
+}
+
 /// Smooth soft-edged radial glow mesh (no banding, works identically on OpenGL and wgpu).
-fn paint_radial_glow(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32, center_alpha: f32) {
+pub(super) fn paint_radial_glow(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32, center_alpha: f32) {
     if radius <= 1.0 || center_alpha <= 0.001 {
         return;
     }
@@ -301,8 +445,9 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     let area = ui.max_rect();
     let video = app.shown_video().cloned();
     let video_mode = video.is_some();
-    let video_lyrics = video_mode && look.now_playing.video_lyrics && !app.no_lyrics() && content_wide(area);
-    let no_lyrics = app.no_lyrics() || (video_mode && !video_lyrics);
+    let video_as_vinyl = video_mode && app.vinyl_mode && app.video_vinyl;
+    let video_lyrics = video_mode && !video_as_vinyl && !app.no_lyrics() && content_wide(area);
+    let no_lyrics = app.no_lyrics() || (video_mode && !video_as_vinyl && !video_lyrics);
     // Header: on the window buttons' line, when the app draws them.
     let lift = 20.0 - f32::from(super::titlebar::top_margin(20, 44.0));
     let header = Rect::from_min_size(area.min - vec2(0.0, if app.fullscreen { 0.0 } else { lift }), vec2(area.width(), 44.0));
@@ -428,7 +573,8 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
     let cs = &look.cover;
     let layout = cs.layout_in(app.fullscreen);
     let cover_side = cs.fullscreen.filter(|_| app.fullscreen).and_then(|f| f.side).unwrap_or(cs.side);
-    if let Some(video) = video {
+    let video_as_vinyl = video.is_some() && app.vinyl_mode && app.video_vinyl;
+    if let Some(video) = video.filter(|_| !video_as_vinyl) {
         // Lyrics beside the video, with the video keeping the rest of the view.
         if video_lyrics && app.np_tab == NpTab::Lyrics {
             let share = look.now_playing.video_panel_frac.map_or(0.63, |[win, full]| if app.fullscreen { full } else { win });
@@ -443,7 +589,7 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
         }
         return;
     }
-    if app.video.take().is_some() {
+    if video.is_none() && app.video.take().is_some() {
         app.video_frame = None;
         app.glow = None;
         app.restore_art();
@@ -1012,46 +1158,17 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
     let brightness = fs.brightness.unwrap_or(cs.brightness);
     let tint = Color32::from_gray((brightness.clamp(0.1, 1.0) * 255.0) as u8);
     if round {
-        let last_id = egui::Id::unique("record-last-frame");
-        let should_spin = is_vinyl && (!app.vinyl_mode || app.vinyl_rotate) && (app.playing() || cs.spin_when_paused);
-        if should_spin {
-            // Real time since the last frame: egui's smoothed estimate makes uneven frames step.
-            let dt = (now - ui.ctx().data(|d| d.get_temp::<f64>(last_id)).unwrap_or(now)).clamp(0.0, 0.1);
-            ui.ctx().data_mut(|d| d.insert_temp(last_id, now));
-            let spin_secs = if app.vinyl_mode { app.vinyl_speed.clamp(1.8, 45.0) } else { cs.spin_secs.max(4.0) };
-            app.record_angle = (app.record_angle + dt * std::f64::consts::TAU / spin_secs as f64) % std::f64::consts::TAU;
-            // High-cadence repaint for silky 60/75/120+ FPS disc rotation.
-            if !app.window_hidden {
-                super::pace::repaint_after(ui.ctx(), std::time::Duration::from_millis(8));
-            }
+        let angle = if is_vinyl {
+            tick_vinyl_angle(app, ui.ctx(), now, cs.spin_secs, cs.spin_when_paused)
         } else {
-            ui.ctx().data_mut(|d| d.insert_temp(last_id, now));
-        }
+            0.0
+        };
         let disc_r = art.width() / 2.0;
         let center = art.center();
-        let angle = if is_vinyl { app.record_angle as f32 } else { 0.0 };
+        let video_tex = app.shown_video().filter(|_| is_vinyl && app.video_vinyl).cloned().and_then(|v| video_frame(app, ui.ctx(), &v));
         if is_vinyl && (app.vinyl_mode || cs.record_details) {
-            // Subtle breathing accent halo behind the vinyl rim when Vinyl beat is on.
-            if app.vinyl_beat && ((app.playing() && !app.buffering) || vinyl_pulse > 0.002) {
-                let halo_r = disc_r * (1.18 + vinyl_pulse * 0.22);
-                let halo_a = (0.08 + vinyl_pulse * 0.36).min(0.46);
-                paint_radial_glow(ui.painter(), center, halo_r, app.accent_color(), halo_a);
-            }
-            // Ultra-thin dark vinyl rim with ~96.4% cover art fill and frosted metallic silver spindle.
-            let p = ui.painter();
-            p.circle_filled(center, disc_r, Color32::from_rgb(14, 14, 18));
-            p.circle_stroke(center, disc_r - 0.75, egui::Stroke::new(1.5, Color32::from_rgba_unmultiplied(46, 46, 58, 255)));
-            p.circle_stroke(center, disc_r * 0.984, egui::Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 255, 255, 22)));
-            widgets::paint_disc(ui, center, disc_r * 0.964, &track.thumbs, angle, tint, px);
-            let p = ui.painter();
-            p.circle_stroke(center, disc_r * 0.964, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 95)));
-            // Frosted metallic silver center spindle & dark spindle hole.
-            p.circle_filled(center, disc_r * 0.186, Color32::from_rgba_unmultiplied(0, 0, 0, 68));
-            p.circle_filled(center, disc_r * 0.172, Color32::from_rgba_unmultiplied(232, 235, 242, 236));
-            p.circle_stroke(center, disc_r * 0.140, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 92)));
-            p.circle_stroke(center, disc_r * 0.172, egui::Stroke::new(1.3, Color32::from_rgba_unmultiplied(255, 255, 255, 215)));
-            p.circle_filled(center, disc_r * 0.048, Color32::from_rgb(10, 10, 14));
-            p.circle_stroke(center, disc_r * 0.048, egui::Stroke::new(0.9, Color32::from_rgba_unmultiplied(255, 255, 255, 55)));
+            let halo = (app.vinyl_beat && ((app.playing() && !app.buffering) || vinyl_pulse > 0.002)).then_some((app.accent_color(), vinyl_pulse));
+            paint_vinyl_disc(ui, center, disc_r, &track.thumbs, video_tex.as_ref(), angle, tint, px, 0.964, halo, false);
         } else {
             widgets::paint_disc(ui, center, disc_r, &track.thumbs, angle, tint, px);
         }
@@ -1105,7 +1222,24 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
         let grown = if np.cover_play_hover != 1.0 && ui.rect_contains_pointer(Rect::from_center_size(art.center(), Vec2::splat(np.cover_play_px))) { np.cover_play_hover } else { 1.0 };
         widgets::icon_at(ui, art.center(), if app.playing() || app.buffering { icon::PAUSE } else { icon::PLAY }, np.cover_play_px * 0.49 * grown, theme::with_alpha(Color32::WHITE, hover));
     }
-    if cover.clicked() && on_art { app.actions.push(Action::TogglePlay); }
+    let video_vinyl_active = is_vinyl && app.video_vinyl && app.shown_video().is_some();
+    if cover.double_clicked() && on_art && video_vinyl_active {
+        app.actions.push(Action::TogglePlay);
+        app.set_video_fullscreen(ui.ctx(), true);
+    } else if cover.clicked() && on_art {
+        app.actions.push(Action::TogglePlay);
+    }
+    if video_vinyl_active && !player && (ui.rect_contains_pointer(art) || hover > 0.0) {
+        let over = if ui.rect_contains_pointer(art) { 1.0 } else { hover };
+        let pip = pos2(art.right() - 22.0, art.top() + 22.0);
+        if corner_button(ui, pip, icon::PICTURE_IN_PICTURE, "Picture in picture (Ctrl+M)", over).clicked() {
+            app.actions.push(Action::Mini(true));
+        }
+        let full = pos2(art.right() - 22.0, art.bottom() - 22.0);
+        if corner_button(ui, full, icon::EXPAND, "Full screen video (F)", over).clicked() {
+            app.set_video_fullscreen(ui.ctx(), true);
+        }
+    }
     if player {
         cover_player(app, ui, track, art, hit, (cr, radius), round, on_art, now);
     }
@@ -2140,6 +2274,7 @@ fn vinyl_options(app: &mut App, ui: &mut Ui) {
     }
     switch_row(ui, "Rotate record", &mut app.vinyl_rotate);
     switch_row(ui, "Vinyl beat", &mut app.vinyl_beat);
+    switch_row(ui, "Video on vinyl", &mut app.video_vinyl);
     // Speed header + value (seconds per turn)
     let (hdr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     ui.painter().text(pos2(hdr.left() + 12.0, hdr.center().y), egui::Align2::LEFT_CENTER, "Spin speed", theme::regular(13.0), theme::text_dim());

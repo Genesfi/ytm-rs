@@ -2251,6 +2251,10 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
                 toggle(ui, &mut app.vinyl_beat, "Vinyl beat");
             });
             divider(ui);
+            setting_row(ui, "Video on vinyl", Some("Wraps music videos inside the spinning vinyl disc so they rotate, pulse, and show lyrics alongside."), |ui| {
+                toggle(ui, &mut app.video_vinyl, "Video on vinyl");
+            });
+            divider(ui);
             let spin_desc = "Seconds per full revolution (1.8 s = 33⅓ RPM, up to 45 s for a slow relaxing drift).";
             setting_row_wide(ui, "Vinyl spin speed", Some(spin_desc), SLIDER_W, |ui| {
                 step_slider(ui, &mut app.vinyl_speed, (1.8, 45.0, 0.5), Some(12.0), |v| format!("{v:.1} s"), "Vinyl spin speed");

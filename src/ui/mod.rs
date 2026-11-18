@@ -571,6 +571,8 @@ pub struct App {
     vinyl_speed: f32,
     /// Pulse the vinyl disc & its rim halo on bass beats.
     vinyl_beat: bool,
+    /// Wrap music videos inside the spinning vinyl disc (with lyrics alongside).
+    video_vinyl: bool,
     /// Pulse the Now Playing ambient background glow on bass beats.
     ambient_beat: bool,
     /// Smoothed beat pulse (0..1) and last frame timestamp for fluid 60–120+ FPS easing.
@@ -991,6 +993,7 @@ impl App {
             vinyl_rotate: get("vinyl_rotate").is_none_or(|v| v == "1"),
             vinyl_speed: get("vinyl_speed").and_then(|v| v.parse::<f32>().ok()).unwrap_or(12.0).clamp(1.8, 45.0),
             vinyl_beat: get("vinyl_beat").is_none_or(|v| v == "1"),
+            video_vinyl: get("video_vinyl").is_none_or(|v| v == "1"),
             ambient_beat: get("ambient_beat").is_none_or(|v| v == "1"),
             beat_smooth: 0.0,
             beat_last_frame: 0.0,
@@ -1447,7 +1450,12 @@ impl App {
         self.storage.clear(ctx, self.backend.data_dir(), keep_updates);
     }
 
-
+    /// Circular vinyl picture-in-picture is up: keep the corners transparent and hide any DWM backdrop.
+    fn vinyl_pip_showing(&self) -> bool {
+        self.mini.video_showing()
+            && self.vinyl_mode
+            && ((self.shown_video().is_some() && self.video_vinyl) || (self.shown_video().is_none() && self.current().is_some()))
+    }
 }
 
 
@@ -1455,7 +1463,7 @@ impl App {
 impl eframe::App for App {
     /// With a window material, nothing under the pages but what they paint.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        if self.mini.pill_showing() || crate::backdrop::active() != crate::backdrop::Backdrop::None {
+        if self.mini.pill_showing() || self.vinyl_pip_showing() || crate::backdrop::active() != crate::backdrop::Backdrop::None {
             return [0.0; 4];
         }
         // Opaque: a see-through window (made for the pill) mustn't show the desktop here.
@@ -1647,7 +1655,10 @@ impl eframe::App for App {
         // The mini player, or nothing but the background while the window changes size.
         let layout = self.mini.layout(&ctx);
         // Only the player bar shows the window's material once the pages are covered.
-        crate::backdrop::follow(crate::backdrop::shows() && !self.mini.pill_showing(), light && (np < 1.0 || layout != mini::Layout::Full));
+        // Shaped floating mini players (pill / circular vinyl PiP) turn the DWM backdrop off so
+        // Windows 11 doesn't paint a rectangular Mica/Acrylic sheet behind the clipped region.
+        let shaped = self.mini.pill_showing() || self.vinyl_pip_showing();
+        crate::backdrop::follow(crate::backdrop::shows() && !shaped, light && (np < 1.0 || layout != mini::Layout::Full));
         // The installed fonts arrived: the theme's can be loaded now. Not the first frame,
         // which is applying anyway and adds a texture loader.
         if self.chrome_applied.is_some() && theme::fonts_became_ready() {
@@ -1683,7 +1694,9 @@ impl eframe::App for App {
             // Any shape: by every edge and corner, unlike the strip.
             titlebar::resize_edges(&ctx);
             shell::toast(self, &ctx, now);
-            self.mini.fade_in(&ctx, now, Color32::BLACK);
+            if !self.vinyl_pip_showing() {
+                self.mini.fade_in(&ctx, now, Color32::BLACK);
+            }
             dev_screenshot(&ctx, now);
             return;
         }
@@ -1770,6 +1783,7 @@ impl eframe::App for App {
             theme::set_mode(&ctx, pages);
         }
         self.queue_float = None;
+        let mut queue_w = 0.0f32;
         if !self.fullscreen && !covered {
             use crate::preset::SidebarStyle;
             let side_alpha = app_style.sidebar_alpha.clamp(0.0, 1.0);
@@ -1807,6 +1821,7 @@ impl eframe::App for App {
                     shell::sidebar(self, ui)
                 });
             let q = theme::anim_bool(&ctx, "queue-drawer", self.queue_open && !self.np_open, 0.25).min(1.0);
+            queue_w = 340.0 * q;
             if q > 0.01 && screen.width() < 1000.0 {
                 // No room to give it without crushing the page: it floats over that instead.
                 let r = egui::Rect::from_min_size(egui::pos2(screen.right() - 340.0 * q, screen.top()), egui::vec2(340.0, screen.height() - self.bar_height()));
@@ -1878,6 +1893,7 @@ impl eframe::App for App {
             shell::floating_bar(self, &mut bar, r, now);
             theme::set_mode(&ctx, pages);
         }
+        nowplaying::floating_mini_vinyl(self, &ctx, screen, queue_w, np, now);
         if np > 0.001 {
             theme::set_mode(&ctx, false);
             nowplaying::overlay(self, &ctx, now);
@@ -2059,6 +2075,7 @@ impl eframe::App for App {
         storage.set_string("vinyl_rotate", b(self.vinyl_rotate));
         storage.set_string("vinyl_speed", format!("{:.1}", self.vinyl_speed));
         storage.set_string("vinyl_beat", b(self.vinyl_beat));
+        storage.set_string("video_vinyl", b(self.video_vinyl));
         storage.set_string("ambient_beat", b(self.ambient_beat));
         storage.set_string("seek_knob_always", b(self.seek_knob_always));
         storage.set_string("sponsorblock", b(self.sponsorblock));

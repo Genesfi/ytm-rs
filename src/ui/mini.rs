@@ -506,7 +506,7 @@ impl Mini {
             ctx.request_repaint_after(Duration::from_secs_f64(wait.max(0.05)));
             return;
         }
-        let by_height = self.shaped.is_some_and(|from| height_led(from, size));
+        let by_height = self.shaped.map_or((ratio - 1.0).abs() < 0.01 && size.x > size.y, |from| height_led(from, size));
         let target = in_shape(ratio, size, by_height, VIDEO_MIN, VIDEO_MAX);
         log::debug!("picture in picture: {size:?} to the video's shape, {target:?}");
         self.asked_from = Some(size);
@@ -523,6 +523,13 @@ impl Mini {
         if self.shape != shape {
             self.shape = shape;
             crate::fullscreen::set_window_shape(shape);
+        }
+    }
+
+    /// Restore the window's full rectangular shape if it was clipped.
+    fn clear_shape(&mut self) {
+        if self.shape.take().is_some() {
+            crate::fullscreen::set_window_shape(None);
         }
     }
 
@@ -629,6 +636,11 @@ impl Mini {
     /// changing size): the window around it is see-through.
     pub fn pill_showing(&self) -> bool {
         pill_now() && self.on
+    }
+
+    /// Picture in picture is up, on the way back included.
+    pub fn video_showing(&self) -> bool {
+        video_active() && self.on
     }
 
     /// This mini player's last place.
@@ -792,10 +804,9 @@ impl Mini {
         });
         // The pill has no frame of its own, on any system.
         let frame = if to_mini && pill_now() { Vec2::ZERO } else { frame };
+        self.clear_shape();
         if pill_now() {
             ctx.send_viewport_cmd(ViewportCommand::Decorations(!to_mini && !titlebar::custom()));
-            self.shape = None;
-            crate::fullscreen::set_window_shape(None);
         }
         if to_mini {
             self.full = now_place.map(|p| (p, self.was_maximized));
@@ -903,6 +914,15 @@ pub fn strip(app: &mut App, ui: &mut Ui, now: f64) {
     let pad = 12.0;
     let art = Rect::from_min_size(r.min + Vec2::splat(pad), Vec2::splat(r.height() - 2.0 * pad - 4.0));
     match &track {
+        Some(t) if app.vinyl_mode => {
+            let beat = super::nowplaying::update_beat(app, &ctx, now);
+            let pulse = if app.vinyl_beat { beat } else { 0.0 };
+            let angle = super::nowplaying::tick_vinyl_angle(app, &ctx, now, 22.0, false);
+            let disc_r = art.width() * 0.475 * (1.0 + pulse * 0.055);
+            let halo = (app.vinyl_beat && ((app.playing() && !app.buffering) || pulse > 0.002)).then_some((app.accent_color(), pulse));
+            let px = (art.width() * ctx.pixels_per_point()).ceil() as u32;
+            super::nowplaying::paint_vinyl_disc(ui, art.center(), disc_r, &t.thumbs, None, angle, Color32::WHITE, px, 0.905, halo, true);
+        }
         Some(t) => paint_cover(ui, art, &t.thumbs, theme::thumb_radius() + 1.0, 1.0),
         None => {
             ui.painter().rect_filled(art, theme::thumb_radius() + 1.0, theme::glass_panel(0.08));
@@ -1180,6 +1200,14 @@ fn pill_row(app: &mut App, ui: &mut Ui, rect: Rect, reveal: f32, toast: Option<S
     }
     let art = Rect::from_center_size(c, Vec2::splat(32.0));
     match &track {
+        Some(t) if app.vinyl_mode => {
+            let beat = super::nowplaying::update_beat(app, &ctx, now);
+            let pulse = if app.vinyl_beat { beat } else { 0.0 };
+            let angle = super::nowplaying::tick_vinyl_angle(app, &ctx, now, 22.0, false);
+            let disc_r = 16.0 * (1.0 + pulse * 0.04);
+            let px = (36.0 * ctx.pixels_per_point()).ceil() as u32;
+            super::nowplaying::paint_vinyl_disc(ui, c, disc_r, &t.thumbs, None, angle, Color32::WHITE, px, 0.89, None, false);
+        }
         Some(t) => paint_cover(ui, art, &t.thumbs, 16.0, 1.0),
         None => {
             ui.painter().rect_filled(art, 16.0, theme::glass_panel(0.08));
@@ -1320,6 +1348,15 @@ fn card_body(app: &mut App, ui: &mut Ui, cr: Rect, now: f64) {
     // The cover, title, artists and album, and a like.
     let art = Rect::from_min_size(pos2(l, top + 60.0), Vec2::splat(68.0));
     match &track {
+        Some(t) if app.vinyl_mode => {
+            let beat = super::nowplaying::update_beat(app, &ctx, now);
+            let pulse = if app.vinyl_beat { beat } else { 0.0 };
+            let angle = super::nowplaying::tick_vinyl_angle(app, &ctx, now, 22.0, false);
+            let disc_r = art.width() * 0.475 * (1.0 + pulse * 0.055);
+            let halo = (app.vinyl_beat && ((app.playing() && !app.buffering) || pulse > 0.002)).then_some((app.accent_color(), pulse));
+            let px = (art.width() * ctx.pixels_per_point()).ceil() as u32;
+            super::nowplaying::paint_vinyl_disc(ui, art.center(), disc_r, &t.thumbs, None, angle, Color32::WHITE, px, 0.905, halo, true);
+        }
         Some(t) => paint_cover(ui, art, &t.thumbs, theme::thumb_radius() + 4.0, 1.0),
         None => {
             ui.painter().rect_filled(art, theme::thumb_radius() + 4.0, theme::glass_panel(0.08));
@@ -1469,36 +1506,69 @@ pub fn video_pip(app: &mut App, ui: &mut Ui, now: f64) {
     if titlebar::drag_strip(ui, r, "pip").double_clicked() {
         app.actions.push(Action::Mini(false));
     }
-    ui.painter().rect_filled(r, 0.0, Color32::BLACK);
     let track = app.current().cloned();
     let video = app.shown_video().cloned();
     let frame = video.as_ref().and_then(|t| super::nowplaying::video_frame(app, &ctx, t));
-    // The window takes its shape (see `keep_shape`); a song without a video leaves it be.
-    app.mini.video_shape = frame.as_ref().map(|tex| tex.size_vec2()).filter(|s| s.x > 0.0 && s.y > 0.0).map(|s| s.x / s.y);
-    match (&frame, &video, &track) {
-        (Some(tex), _, _) => {
-            let size = tex.size_vec2();
-            let fit = size * (r.width() / size.x).min(r.height() / size.y);
-            egui::Image::from_texture((tex.id(), fit)).paint_at(ui, Rect::from_center_size(r.center(), fit));
+    let vinyl_pip = app.vinyl_mode && ((video.is_some() && app.video_vinyl) || (video.is_none() && track.is_some()));
+    // The window takes its shape (see `keep_shape`); vinyl PiP clips cleanly to a round disc on Windows.
+    app.mini.video_shape = if vinyl_pip {
+        Some(1.0)
+    } else {
+        frame.as_ref().map(|tex| tex.size_vec2()).filter(|s| s.x > 0.0 && s.y > 0.0).map(|s| s.x / s.y)
+    };
+    let side = r.width().min(r.height());
+    let disc_r = (side / 2.0 - 1.5).max(16.0);
+    if vinyl_pip {
+        let disc_rect = Rect::from_center_size(r.center(), Vec2::splat(disc_r * 2.0));
+        app.mini.shape_to(&ctx, disc_rect, disc_r);
+        let beat = super::nowplaying::update_beat(app, &ctx, now);
+        let pulse = if app.vinyl_beat { beat } else { 0.0 };
+        let angle = super::nowplaying::tick_vinyl_angle(app, &ctx, now, 22.0, false);
+        let px = (side * ctx.pixels_per_point()).ceil() as u32;
+        let thumbs = video.as_ref().or(track.as_ref()).map_or(&[][..], |t| t.thumbs.as_slice());
+        // Slightly expand the inner artwork/video on bass kicks while keeping the outer circular disc smooth.
+        let rim_ratio = (0.915 + pulse * 0.028).min(0.95);
+        super::nowplaying::paint_vinyl_disc(ui, r.center(), disc_r, thumbs, frame.as_ref(), angle, Color32::WHITE, px, rim_ratio, None, false);
+        // Crisp circular bezel inside the window clip, glowing softly with the beat when Vinyl beat is on.
+        let p = ui.painter();
+        p.circle_stroke(r.center(), (disc_r - 0.8).max(1.0), egui::Stroke::new(1.6, Color32::from_rgba_unmultiplied(54, 54, 68, 255)));
+        if app.vinyl_beat && ((app.playing() && !app.buffering) || pulse > 0.002) {
+            let glow_a = (0.18 + pulse * 0.62).min(0.85);
+            let glow_w = 1.6 + pulse * 2.6;
+            p.circle_stroke(r.center(), (disc_r - glow_w * 0.5 - 0.6).max(1.0), egui::Stroke::new(glow_w, theme::with_alpha(app.accent_color(), glow_a)));
         }
-        (None, Some(v), _) => {
-            let fit = vec2(16.0, 9.0) * (r.width() / 16.0).min(r.height() / 9.0);
-            super::nowplaying::video_placeholder(ui, Rect::from_center_size(r.center(), fit), v, 0.0);
+    } else {
+        app.mini.clear_shape();
+        ui.painter().rect_filled(r, 0.0, Color32::BLACK);
+        match (&frame, &video, &track) {
+            (Some(tex), _, _) => {
+                let size = tex.size_vec2();
+                let fit = size * (r.width() / size.x).min(r.height() / size.y);
+                egui::Image::from_texture((tex.id(), fit)).paint_at(ui, Rect::from_center_size(r.center(), fit));
+            }
+            (None, Some(v), _) => {
+                let fit = vec2(16.0, 9.0) * (r.width() / 16.0).min(r.height() / 9.0);
+                super::nowplaying::video_placeholder(ui, Rect::from_center_size(r.center(), fit), v, 0.0);
+            }
+            (None, None, Some(t)) => paint_cover(ui, Rect::from_center_size(r.center(), Vec2::splat(r.height() - 24.0)), &t.thumbs, theme::thumb_radius() + 2.0, 1.0),
+            (None, None, None) => icon_at(ui, r.center(), icon::MUSIC, 32.0, theme::text_faint()),
         }
-        (None, None, Some(t)) => paint_cover(ui, Rect::from_center_size(r.center(), Vec2::splat(r.height() - 24.0)), &t.thumbs, theme::thumb_radius() + 2.0, 1.0),
-        (None, None, None) => icon_at(ui, r.center(), icon::MUSIC, 32.0, theme::text_faint()),
     }
 
     // The controls, while pointed at (or one has the keyboard).
     let keys = ["prev", "play", "next", "pin", "full", "close"];
     let btn_id = |key: &str| egui::Id::unique(("pip-btn", key));
     let focused = ctx.memory(|m| m.focused()).is_some_and(|f| keys.iter().any(|k| btn_id(k) == f));
-    let over = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p));
+    let over = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| if vinyl_pip { p.distance(r.center()) <= disc_r + 1.0 } else { r.contains(p) });
     let reveal = theme::anim_bool(&ctx, "pip-controls", over || focused, 0.15);
     if reveal <= 0.0 {
         return;
     }
-    ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha((110.0 * reveal) as u8));
+    if vinyl_pip {
+        ui.painter().circle_filled(r.center(), disc_r + 1.5, Color32::from_black_alpha((125.0 * reveal) as u8));
+    } else {
+        ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha((110.0 * reveal) as u8));
+    }
     let enabled = track.is_some();
     let btn = |ui: &mut Ui, c: Pos2, side: f32, key: &str, name: &str| -> egui::Response {
         let b = Rect::from_center_size(c, Vec2::splat(side));
@@ -1518,7 +1588,7 @@ pub fn video_pip(app: &mut App, ui: &mut Ui, now: f64) {
 
     // Previous, play, next, in the middle.
     let c = r.center();
-    let gap = (r.width() * 0.16).clamp(48.0, 84.0);
+    let gap = if vinyl_pip { (disc_r * 0.54).clamp(44.0, 82.0) } else { (r.width() * 0.16).clamp(48.0, 84.0) };
     let prev = btn(ui, c - vec2(gap, 0.0), 44.0, "prev", "Previous");
     icon_at(ui, c - vec2(gap, 0.0), icon::SKIP_BACK, 22.0, white);
     if live(&prev) && enabled {
@@ -1536,28 +1606,68 @@ pub fn video_pip(app: &mut App, ui: &mut Ui, now: f64) {
         app.toggle();
     }
 
-    // Top right: close (with no system frame to have one), the full window, pin.
-    let mut x = r.right() - 22.0;
-    let mut corner = |ui: &mut Ui, glyph: char, key: &str, name: &str| -> bool {
-        let resp = btn(ui, pos2(x, r.top() + 22.0), 32.0, key, name);
-        icon_at(ui, pos2(x, r.top() + 22.0), glyph, 16.0, white);
-        x -= 36.0;
-        live(&resp)
-    };
-    if titlebar::custom() && corner(ui, icon::X, "close", "Close") {
-        close_window(app, &ctx);
-    }
-    if corner(ui, icon::MAXIMIZE_2, "full", "Full window (Ctrl+M)") {
-        app.actions.push(Action::Mini(false));
-    }
-    let pinned = app.mini.pinned;
-    if corner(ui, if pinned { icon::PIN } else { icon::PIN_OFF }, "pin", if pinned { "Stop keeping on top" } else { "Keep on top" }) {
-        app.mini.set_pinned(&ctx, !pinned);
-    }
+    if vinyl_pip {
+        // Centred along the upper arc so nothing is clipped by the circular window.
+        let top_y = c.y - (disc_r * 0.55).max(46.0);
+        let pinned = app.mini.pinned;
+        let items: Vec<(char, &str, &str)> = if titlebar::custom() {
+            vec![
+                (if pinned { icon::PIN } else { icon::PIN_OFF }, "pin", if pinned { "Stop keeping on top" } else { "Keep on top" }),
+                (icon::MAXIMIZE_2, "full", "Full window (Ctrl+M)"),
+                (icon::X, "close", "Close"),
+            ]
+        } else {
+            vec![
+                (if pinned { icon::PIN } else { icon::PIN_OFF }, "pin", if pinned { "Stop keeping on top" } else { "Keep on top" }),
+                (icon::MAXIMIZE_2, "full", "Full window (Ctrl+M)"),
+            ]
+        };
+        let step = 36.0;
+        let start_x = c.x - step * (items.len() as f32 - 1.0) / 2.0;
+        for (i, (glyph, key, name)) in items.into_iter().enumerate() {
+            let p = pos2(start_x + i as f32 * step, top_y);
+            let resp = btn(ui, p, 32.0, key, name);
+            icon_at(ui, p, glyph, 16.0, white);
+            if live(&resp) {
+                match key {
+                    "close" => close_window(app, &ctx),
+                    "full" => app.actions.push(Action::Mini(false)),
+                    "pin" => app.mini.set_pinned(&ctx, !pinned),
+                    _ => {}
+                }
+            }
+        }
+        // Compact pill seek bar along the lower arc of the disc.
+        let seek_w = (disc_r * 1.15).clamp(80.0, 220.0);
+        let seek_y = c.y + (disc_r * 0.58).max(48.0);
+        let seek_rect = Rect::from_center_size(pos2(c.x, seek_y), vec2(seek_w, 10.0));
+        let mut faded = ui.new_child(egui::UiBuilder::new().max_rect(r));
+        faded.multiply_opacity(reveal);
+        seek_line_pill(app, &mut faded, seek_rect, track.as_ref());
+    } else {
+        // Top right: close (with no system frame to have one), the full window, pin.
+        let mut x = r.right() - 22.0;
+        let mut corner = |ui: &mut Ui, glyph: char, key: &str, name: &str| -> bool {
+            let resp = btn(ui, pos2(x, r.top() + 22.0), 32.0, key, name);
+            icon_at(ui, pos2(x, r.top() + 22.0), glyph, 16.0, white);
+            x -= 36.0;
+            live(&resp)
+        };
+        if titlebar::custom() && corner(ui, icon::X, "close", "Close") {
+            close_window(app, &ctx);
+        }
+        if corner(ui, icon::MAXIMIZE_2, "full", "Full window (Ctrl+M)") {
+            app.actions.push(Action::Mini(false));
+        }
+        let pinned = app.mini.pinned;
+        if corner(ui, if pinned { icon::PIN } else { icon::PIN_OFF }, "pin", if pinned { "Stop keeping on top" } else { "Keep on top" }) {
+            app.mini.set_pinned(&ctx, !pinned);
+        }
 
-    let mut faded = ui.new_child(egui::UiBuilder::new().max_rect(r));
-    faded.multiply_opacity(reveal);
-    seek_line(app, &mut faded, r, track.as_ref());
+        let mut faded = ui.new_child(egui::UiBuilder::new().max_rect(r));
+        faded.multiply_opacity(reveal);
+        seek_line(app, &mut faded, r, track.as_ref());
+    }
 }
 
 /// What the mini player's × does.
@@ -1599,6 +1709,50 @@ fn seek_line(app: &mut App, ui: &mut Ui, r: Rect, track: Option<&crate::model::T
         let bg = Rect::from_center_size(pos2(x, line.top() - 13.0), g.size() + vec2(12.0, 5.0));
         ui.painter().rect_filled(bg, 5.0, theme::shade(0.8).gamma_multiply(h));
         ui.painter().galley(bg.min + vec2(6.0, 2.5), g, Color32::WHITE.gamma_multiply(h));
+    }
+    if total > 0.0
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        if resp.dragged() {
+            app.seek_drag = Some(at(p));
+        }
+        if resp.drag_stopped() || resp.clicked() {
+            app.seek_drag = None;
+            app.actions.push(Action::Seek(at(p)));
+        }
+    }
+}
+
+/// Compact pill-shaped seek bar centered inside the circular vinyl PiP disc.
+fn seek_line_pill(app: &mut App, ui: &mut Ui, hit: Rect, track: Option<&crate::model::Track>) {
+    let status = app.audio.status.clone();
+    let total = song_length(app, track);
+    let pos = app.seek_drag.unwrap_or(status.position_smooth().as_secs_f32()).min(total.max(0.0));
+    let resp = ui.interact(hit.expand2(vec2(4.0, 6.0)), ui.scope_id().with("mini-seek-pill"), Sense::click_and_drag());
+    let resp = if total > 0.0 { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+    resp.widget_info(|| egui::WidgetInfo::slider(total > 0.0, pos as f64, "Seek"));
+    let h = theme::anim_bool(ui.ctx(), "mini-seek-pill-h", total > 0.0 && (resp.hovered() || resp.dragged()), 0.15);
+    let thick = 4.0 + 2.0 * h;
+    let bar = Rect::from_center_size(hit.center(), vec2(hit.width(), thick));
+    let r = thick / 2.0;
+    ui.painter().rect_filled(bar, r, Color32::WHITE.gamma_multiply(0.28));
+    let frac = if total > 0.0 { pos / total } else { 0.0 };
+    let fill = Rect::from_min_size(bar.min, vec2(bar.width() * frac, thick));
+    ui.painter().rect_filled(fill, r, app.accent_color());
+    if h > 0.0 {
+        ui.painter().circle_filled(pos2(fill.right(), bar.center().y), 5.0 * h, Color32::WHITE);
+    }
+    let at = |p: Pos2| ((p.x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0) * total;
+    if h > 0.0
+        && let Some(p) = resp.hover_pos().or(resp.interact_pointer_pos())
+    {
+        let txt = format!("{} / {}", fmt_time(at(p) as u32), fmt_time(total as u32));
+        let g = widgets::galley(ui, &txt, theme::semibold(11.0), Color32::WHITE, 120.0);
+        let half = g.size().x / 2.0 + 5.0;
+        let x = p.x.clamp(bar.left() + half, bar.right() - half);
+        let bg = Rect::from_center_size(pos2(x, bar.top() - 14.0), g.size() + vec2(10.0, 4.0));
+        ui.painter().rect_filled(bg, 5.0, theme::shade(0.82).gamma_multiply(h));
+        ui.painter().galley(bg.min + vec2(5.0, 2.0), g, Color32::WHITE.gamma_multiply(h));
     }
     if total > 0.0
         && let Some(p) = resp.interact_pointer_pos()
