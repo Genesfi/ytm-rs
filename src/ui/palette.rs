@@ -157,6 +157,7 @@ fn entries(app: &App) -> Vec<Entry> {
             let glyph = match page {
                 Page::Home => icon::HOUSE,
                 Page::Explore => icon::COMPASS,
+                Page::Stats => icon::STATS,
                 Page::Library(LibTab::Downloads) => icon::DOWNLOAD,
                 _ => icon::LIBRARY,
             };

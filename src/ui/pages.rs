@@ -61,6 +61,7 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
             Page::Settings => {}
             Page::Transfer => super::transfer::page(app, ui, now),
             Page::Jam => super::jam::page(app, ui),
+            Page::Stats => super::stats::page(app, ui),
         }
         ui.add_space(40.0 + insets[1]);
     });
@@ -2229,9 +2230,44 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
             toggle(ui, &mut app.reactive_bg, "Pulse with the music");
         });
         divider(ui);
+        setting_row(ui, "Ambient beat", Some("Breathing accent glow behind Now playing that pulses to the bass beat."), |ui| {
+            toggle(ui, &mut app.ambient_beat, "Ambient beat");
+        });
+        divider(ui);
         setting_row(ui, "Dim bright covers", Some("Darkens the background when the album art is bright, so the lyrics and titles over it stay easy to read. Dark covers are left as they are."), |ui| {
             toggle(ui, &mut app.dim_bright, "Dim bright covers");
         });
+        divider(ui);
+        setting_row(ui, "Vinyl disc", Some("Renders the Now Playing artwork as a thin-rimmed vinyl record with a metallic center spindle across every theme."), |ui| {
+            toggle(ui, &mut app.vinyl_mode, "Vinyl disc");
+        });
+        if app.vinyl_mode {
+            divider(ui);
+            setting_row(ui, "Rotate vinyl", Some("Spins the vinyl disc smoothly while music is playing."), |ui| {
+                toggle(ui, &mut app.vinyl_rotate, "Rotate vinyl");
+            });
+            divider(ui);
+            setting_row(ui, "Vinyl beat", Some("Pulses the vinyl disc and its rim glow in time with the bass beat."), |ui| {
+                toggle(ui, &mut app.vinyl_beat, "Vinyl beat");
+            });
+            divider(ui);
+            let spin_desc = "Seconds per full revolution (1.8 s = 33⅓ RPM, up to 45 s for a slow relaxing drift).";
+            setting_row_wide(ui, "Vinyl spin speed", Some(spin_desc), SLIDER_W, |ui| {
+                step_slider(ui, &mut app.vinyl_speed, (1.8, 45.0, 0.5), Some(12.0), |v| format!("{v:.1} s"), "Vinyl spin speed");
+            });
+            if filter_show(ui, &format!("Vinyl spin speed {spin_desc}")) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    for (label, secs) in [("33⅓ RPM", 1.8_f32), ("8 s", 8.0), ("20 s", 20.0), ("35 s", 35.0)] {
+                        let active = (app.vinyl_speed - secs).abs() < 0.35;
+                        if pill(ui, label, None, active).clicked() {
+                            app.vinyl_speed = secs;
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+            }
+        }
         divider(ui);
         setting_row(ui, "Font", Some("For the whole app and the lyrics. Any font installed on this PC works, e.g. one made for your language."), |ui| {
             if let Some(name) = font_picker(ui) {

@@ -198,6 +198,87 @@ impl App {
         }
     }
 
+    /// FocusGrow & DynamicNotification / Dynamic Island WebSocket bridge (`ws://127.0.0.1:8765`).
+    /// Keeps track metadata and play/pause state in sync, handles remote controls, and
+    /// restores ytm-rs straight out of the system tray when toggled from FocusGrow/Island.
+    pub(super) fn sync_bridge(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if std::env::var_os("YTM_BACKGROUND").is_some() || std::env::var_os("YTM_SMOKE").is_some() {
+            return;
+        }
+        if self.bridge.is_none() {
+            let due = self.bridge_retry.is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
+            if due {
+                self.bridge_retry = Some(std::time::Instant::now());
+                let wake_ctx = ctx.clone();
+                if let Some(b) = crate::bridge::Bridge::new(Arc::new(move || wake_ctx.request_repaint())) {
+                    self.bridge = Some(b);
+                    self.bridge_track = None;
+                    self.bridge_playing = None;
+                }
+            }
+        }
+        let events = self.bridge.as_ref().map(|b| b.events()).unwrap_or_default();
+        let wayland = is_wayland(frame);
+        for ev in events {
+            match ev {
+                crate::bridge::BridgeEvent::PlayPause => self.toggle(),
+                crate::bridge::BridgeEvent::Next => self.next(),
+                crate::bridge::BridgeEvent::Previous => self.prev(),
+                crate::bridge::BridgeEvent::ToggleWindow => self.toggle_bridge_window(ctx, wayland),
+                crate::bridge::BridgeEvent::Seek(to) => {
+                    self.apply(super::Action::Seek(to.as_secs_f32()));
+                    // Re-broadcast track payload so connected overlays update their progress bar.
+                    self.bridge_track = None;
+                }
+            }
+        }
+
+        let Some(bridge) = &self.bridge else { return };
+        let Some(track) = self.playing_track().cloned() else { return };
+        let playing = self.playing() && !self.buffering;
+        let dur_ms = self.audio.status.duration_ms.load(Ordering::Relaxed);
+        let dur_ms = if dur_ms > 0 { dur_ms } else { track.duration.map_or(0, |d| d as u64 * 1000) };
+        let cover = backend::art_url(&track).unwrap_or_default();
+        let sig = (track.id.clone(), track.title.clone(), cover.clone(), dur_ms);
+        let elapsed = self.resume_at.unwrap_or_else(|| self.audio.status.position());
+
+        if self.bridge_track.as_ref() != Some(&sig) {
+            bridge.broadcast_track(
+                &track.title,
+                &track.artist_line(),
+                track.album.as_ref().map(|a| a.name.as_str()),
+                (!cover.is_empty()).then_some(cover.as_str()),
+                Duration::from_millis(dur_ms),
+                elapsed,
+                &track.id,
+                playing,
+            );
+            self.bridge_track = Some(sig);
+            self.bridge_playing = Some(playing);
+        } else if self.bridge_playing != Some(playing) {
+            bridge.broadcast_state(playing, elapsed);
+            self.bridge_playing = Some(playing);
+        }
+    }
+
+    /// Toggle between showing ytm-rs (restoring from tray / minimized to foreground) and
+    /// hiding/minimizing it when FocusGrow or DynamicNotification sends `toggleMusicWindow`.
+    fn toggle_bridge_window(&mut self, ctx: &egui::Context, wayland: bool) {
+        let minimized = ctx.input(|i| i.viewport().minimized) == Some(true);
+        let foreground = !self.in_tray && !minimized && crate::bridge::is_foreground_visible();
+        if foreground {
+            if self.close_to_tray && self.tray.is_some() {
+                ctx.send_viewport_cmd(hide_command(wayland));
+                self.in_tray = true;
+                self.tray_left_focus = false;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        } else {
+            self.bring_back(ctx, wayland);
+        }
+    }
+
     /// Tell Last.fm and ListenBrainz what's playing, and scrobble it once it has played
     /// half its length or 4 minutes (songs under 30 s don't count). Runs every frame, like
     /// Discord's.
@@ -506,6 +587,7 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        crate::bridge::force_show_window();
     }
 
     /// Download the media controls' cover through our own client, into a file.

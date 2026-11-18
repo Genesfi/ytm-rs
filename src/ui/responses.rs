@@ -38,6 +38,7 @@ impl App {
                         // The last song ran out: radio's next songs carry on when they come.
                         self.ended = self.queue.at_end() && !self.buffering;
                         if self.ended {
+                            self.stats_flush();
                             self.top_up();
                         }
                     }

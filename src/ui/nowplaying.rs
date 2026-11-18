@@ -83,6 +83,7 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
             }
+            update_beat(app, ctx, now);
             backdrop(app, ui, sheet, shown, now);
             let [pad_x, pad_y] = look.now_playing.fullscreen_padding.filter(|_| app.fullscreen).unwrap_or([32.0, 20.0]);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(pad_x, pad_y))));
@@ -127,6 +128,7 @@ fn backdrop(app: &mut App, ui: &mut Ui, rect: Rect, clip: Rect, now: f64) {
         // Over a layer the dim is the canvas's opacity (the theme's `opacity`): the
         // layer shows through instead of black, so only `auto_dim` darkens it.
         let (dim, alpha) = if b.layer.is_some() { (auto_dim, b.np_dim) } else { (b.np_dim * auto_dim, 1.0) };
+        let beat_zoom = if app.ambient_beat { app.beat_smooth * 0.08 } else { 0.0 };
         bg.paint(
             &painter,
             rect,
@@ -136,7 +138,7 @@ fn backdrop(app: &mut App, ui: &mut Ui, rect: Rect, clip: Rect, now: f64) {
                 intensity: if b.mode == BgMode::CoverStatic { 0.0 } else { b.intensity },
                 saturation: on_video.and(b.video.saturation).unwrap_or(b.saturation),
                 dim,
-                scale: b.scale + level.min(0.5) * 0.12,
+                scale: b.scale + level.min(0.5) * 0.12 + beat_zoom,
                 contrast: b.np_contrast,
                 dither: on_video.and(b.video.dither).unwrap_or(b.dither),
                 rotate: 0.0,
@@ -189,9 +191,59 @@ fn backdrop(app: &mut App, ui: &mut Ui, rect: Rect, clip: Rect, now: f64) {
     for o in &b.overlays {
         super::shell::overlay_light(&painter, rect, o, app.accent_color());
     }
+    if app.ambient_beat && ((app.playing() && !app.buffering) || app.beat_smooth > 0.003) {
+        let beat = app.beat_smooth;
+        let level = if app.playing() && !app.buffering { app.audio.status.level() } else { 0.0 };
+        let radius = rect.width().min(rect.height()) * (0.44 + beat * 0.15 + level * 0.05);
+        let alpha = (0.08 + beat * 0.24 + level * 0.09).min(0.42);
+        paint_radial_glow(&painter, rect.center(), radius, app.accent_color(), alpha);
+    }
     if app.ambient_light && app.shown_video().is_some() {
         paint_glow(app, ui, rect, clip);
     }
+}
+
+/// Smooth per-frame bass-kick pulse (0..1) shared by Vinyl beat and Ambient beat.
+fn update_beat(app: &mut App, ctx: &egui::Context, now: f64) -> f32 {
+    let want = app.ambient_beat || (app.vinyl_beat && app.vinyl_mode);
+    let dt = (now - app.beat_last_frame).clamp(0.0, 0.1) as f32;
+    app.beat_last_frame = now;
+    let raw = if want && app.playing() && !app.buffering { app.audio.status.beat() } else { 0.0 };
+    let tau = if raw > app.beat_smooth { 0.022 } else { 0.14 };
+    let k = 1.0 - (-dt / tau).exp();
+    app.beat_smooth += (raw - app.beat_smooth) * k;
+    if app.beat_smooth < 0.001 && raw == 0.0 {
+        app.beat_smooth = 0.0;
+    }
+    if !app.window_hidden && ((want && app.playing() && !app.buffering) || app.beat_smooth > 0.002) {
+        super::pace::repaint_after(ctx, std::time::Duration::from_millis(12));
+    }
+    app.beat_smooth
+}
+
+/// Smooth soft-edged radial glow mesh (no banding, works identically on OpenGL and wgpu).
+fn paint_radial_glow(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32, center_alpha: f32) {
+    if radius <= 1.0 || center_alpha <= 0.001 {
+        return;
+    }
+    const STEPS: usize = 48;
+    const RINGS: [(f32, f32); 5] = [(0.0, 1.0), (0.28, 0.70), (0.54, 0.34), (0.78, 0.10), (1.0, 0.0)];
+    let base = theme::with_alpha(color, center_alpha);
+    let mut m = egui::Mesh::default();
+    for &(r_frac, a_frac) in &RINGS {
+        for i in 0..STEPS {
+            let (sin, cos) = (i as f32 / STEPS as f32 * std::f32::consts::TAU).sin_cos();
+            m.colored_vertex(center + vec2(cos, sin) * (radius * r_frac), base.gamma_multiply(a_frac));
+        }
+    }
+    let at = |ring: usize, i: usize| (ring * STEPS + i % STEPS) as u32;
+    for ring in 0..RINGS.len() - 1 {
+        for i in 0..STEPS {
+            m.add_triangle(at(ring, i), at(ring, i + 1), at(ring + 1, i));
+            m.add_triangle(at(ring, i + 1), at(ring + 1, i + 1), at(ring + 1, i));
+        }
+    }
+    painter.add(m);
 }
 
 /// About how much of the art's own brightness now playing's background shows, after the
@@ -924,7 +976,14 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
     if settle_fade < 1.0 {
         ui.multiply_opacity(settle_fade);
     }
-    let round = cs.shape != Shape::Rounded && !fs.plain_shape;
+    let is_vinyl = app.vinyl_mode || (cs.shape == Shape::Record && !fs.plain_shape);
+    let vinyl_pulse = if is_vinyl && app.vinyl_beat { app.beat_smooth } else { 0.0 };
+    let art = if vinyl_pulse > 0.001 {
+        Rect::from_center_size(art.center(), art.size() * (1.0 + vinyl_pulse * 0.058))
+    } else {
+        art
+    };
+    let round = is_vinyl || (cs.shape != Shape::Rounded && !fs.plain_shape);
     let radius = if round { side / 2.0 } else { fs.radius.or(fs.radius_pct.map(|p| p * side)).unwrap_or(cs.radius_pct.map_or(cs.radius, |p| p * side)).clamp(0.0, (side / 2.0).max(0.0)) };
     let top_only = cs.top_only || fs.top_only;
     let cr = if top_only && !round { egui::CornerRadius { nw: radius.min(255.0) as u8, ne: radius.min(255.0) as u8, sw: 0, se: 0 } } else { egui::CornerRadius::same(radius.min(255.0) as u8) };
@@ -953,27 +1012,48 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
     let brightness = fs.brightness.unwrap_or(cs.brightness);
     let tint = Color32::from_gray((brightness.clamp(0.1, 1.0) * 255.0) as u8);
     if round {
-        if cs.shape == Shape::Record && (app.playing() || cs.spin_when_paused) {
+        let last_id = egui::Id::unique("record-last-frame");
+        let should_spin = is_vinyl && (!app.vinyl_mode || app.vinyl_rotate) && (app.playing() || cs.spin_when_paused);
+        if should_spin {
             // Real time since the last frame: egui's smoothed estimate makes uneven frames step.
-            let last_id = egui::Id::unique("record-last-frame");
             let dt = (now - ui.ctx().data(|d| d.get_temp::<f64>(last_id)).unwrap_or(now)).clamp(0.0, 0.1);
             ui.ctx().data_mut(|d| d.insert_temp(last_id, now));
-            app.record_angle = (app.record_angle + dt * std::f64::consts::TAU / cs.spin_secs.max(4.0) as f64) % std::f64::consts::TAU;
-            // At the usual 30 fps a huge disc's edge visibly steps, and paused nothing would draw it at all.
+            let spin_secs = if app.vinyl_mode { app.vinyl_speed.clamp(1.8, 45.0) } else { cs.spin_secs.max(4.0) };
+            app.record_angle = (app.record_angle + dt * std::f64::consts::TAU / spin_secs as f64) % std::f64::consts::TAU;
+            // High-cadence repaint for silky 60/75/120+ FPS disc rotation.
             if !app.window_hidden {
-                super::pace::repaint_after(ui.ctx(), std::time::Duration::from_millis(16));
+                super::pace::repaint_after(ui.ctx(), std::time::Duration::from_millis(8));
             }
+        } else {
+            ui.ctx().data_mut(|d| d.insert_temp(last_id, now));
         }
-        let angle = if cs.shape == Shape::Record { app.record_angle as f32 } else { 0.0 };
-        widgets::paint_disc(ui, art.center(), side / 2.0, &track.thumbs, angle, tint, px);
-        if cs.shape == Shape::Record && cs.record_details {
-            // Vinyl: faint grooves and a spindle hole.
-            let p = ui.painter();
-            for i in 1..6 {
-                p.circle_stroke(art.center(), side / 2.0 * (0.42 + i as f32 * 0.1), egui::Stroke::new(1.0, theme::shade(0.18)));
+        let disc_r = art.width() / 2.0;
+        let center = art.center();
+        let angle = if is_vinyl { app.record_angle as f32 } else { 0.0 };
+        if is_vinyl && (app.vinyl_mode || cs.record_details) {
+            // Subtle breathing accent halo behind the vinyl rim when Vinyl beat is on.
+            if app.vinyl_beat && ((app.playing() && !app.buffering) || vinyl_pulse > 0.002) {
+                let halo_r = disc_r * (1.18 + vinyl_pulse * 0.22);
+                let halo_a = (0.08 + vinyl_pulse * 0.36).min(0.46);
+                paint_radial_glow(ui.painter(), center, halo_r, app.accent_color(), halo_a);
             }
-            p.circle_filled(art.center(), side * 0.09, theme::shade(0.35));
-            p.circle_filled(art.center(), side * 0.022, Color32::from_rgb(10, 10, 12));
+            // Ultra-thin dark vinyl rim with ~96.4% cover art fill and frosted metallic silver spindle.
+            let p = ui.painter();
+            p.circle_filled(center, disc_r, Color32::from_rgb(14, 14, 18));
+            p.circle_stroke(center, disc_r - 0.75, egui::Stroke::new(1.5, Color32::from_rgba_unmultiplied(46, 46, 58, 255)));
+            p.circle_stroke(center, disc_r * 0.984, egui::Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 255, 255, 22)));
+            widgets::paint_disc(ui, center, disc_r * 0.964, &track.thumbs, angle, tint, px);
+            let p = ui.painter();
+            p.circle_stroke(center, disc_r * 0.964, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 95)));
+            // Frosted metallic silver center spindle & dark spindle hole.
+            p.circle_filled(center, disc_r * 0.186, Color32::from_rgba_unmultiplied(0, 0, 0, 68));
+            p.circle_filled(center, disc_r * 0.172, Color32::from_rgba_unmultiplied(232, 235, 242, 236));
+            p.circle_stroke(center, disc_r * 0.140, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 92)));
+            p.circle_stroke(center, disc_r * 0.172, egui::Stroke::new(1.3, Color32::from_rgba_unmultiplied(255, 255, 255, 215)));
+            p.circle_filled(center, disc_r * 0.048, Color32::from_rgb(10, 10, 14));
+            p.circle_stroke(center, disc_r * 0.048, egui::Stroke::new(0.9, Color32::from_rgba_unmultiplied(255, 255, 255, 55)));
+        } else {
+            widgets::paint_disc(ui, center, disc_r, &track.thumbs, angle, tint, px);
         }
     } else {
         if top_only {
@@ -1977,24 +2057,38 @@ fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics:
     for dx in [-6.0, 0.0, 6.0] {
         ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), 1.9, theme::with_alpha(Color32::WHITE, 0.75 + 0.25 * h));
     }
+    let max_h = (ui.ctx().content_rect().height() - 48.0).max(160.0);
     widgets::menu_popup(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-        widgets::menu_body(ui, 270.0);
-        if lyrics {
-            lyric_options(app, ui);
-            menu_divider(ui);
-        }
-        if app.shown_video().is_some() {
-            quality_rows(app, ui);
-            menu_divider(ui);
-        }
-        let liked = app.heard_liked();
-        let asked = app.actions.len();
-        widgets::song_actions(ui, track, liked, None, &mut app.actions);
-        for a in &mut app.actions[asked..] {
-            if let Action::Like(_, like) = a {
-                *a = Action::LikeHeard(*like);
-            }
-        }
+        ui.set_max_width(278.0);
+        egui::ScrollArea::vertical()
+            .id_salt("np-options-scroll")
+            .max_height(max_h)
+            .max_width(278.0)
+            .auto_shrink([true, true])
+            .show(ui, |ui| {
+                widgets::menu_body(ui, 270.0);
+                if lyrics {
+                    lyric_options(app, ui);
+                    menu_divider(ui);
+                }
+                vinyl_options(app, ui);
+                menu_divider(ui);
+                menu_caption(ui, "AMBIENT");
+                switch_row(ui, "Ambient beat", &mut app.ambient_beat);
+                menu_divider(ui);
+                if app.shown_video().is_some() {
+                    quality_rows(app, ui);
+                    menu_divider(ui);
+                }
+                let liked = app.heard_liked();
+                let asked = app.actions.len();
+                widgets::song_actions(ui, track, liked, None, &mut app.actions);
+                for a in &mut app.actions[asked..] {
+                    if let Action::Like(_, like) = a {
+                        *a = Action::LikeHeard(*like);
+                    }
+                }
+            });
     });
 }
 
@@ -2035,6 +2129,52 @@ fn lyric_options(app: &mut App, ui: &mut Ui) {
         app.lyric_prefs.pick(&id, set, p);
         log::info!("lyrics: showing {} ({}/{}) by choice", p.key(), available.iter().position(|x| *x == p).map_or(0, |i| i + 1), n);
         app.lyric_view.reset();
+    }
+}
+
+fn vinyl_options(app: &mut App, ui: &mut Ui) {
+    menu_caption(ui, "VINYL");
+    switch_row(ui, "Vinyl disc", &mut app.vinyl_mode);
+    if !app.vinyl_mode {
+        return;
+    }
+    switch_row(ui, "Rotate record", &mut app.vinyl_rotate);
+    switch_row(ui, "Vinyl beat", &mut app.vinyl_beat);
+    // Speed header + value (seconds per turn)
+    let (hdr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+    ui.painter().text(pos2(hdr.left() + 12.0, hdr.center().y), egui::Align2::LEFT_CENTER, "Spin speed", theme::regular(13.0), theme::text_dim());
+    ui.painter().text(pos2(hdr.right() - 12.0, hdr.center().y), egui::Align2::RIGHT_CENTER, format!("{:.1} s/turn", app.vinyl_speed), theme::semibold(12.5), theme::text());
+    // Smooth custom drag slider (1.8s–45.0s)
+    let (track_row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click_and_drag());
+    let resp = named(resp, "Vinyl spin speed").on_hover_cursor(egui::CursorIcon::PointingHand);
+    let pad = 14.0;
+    let bar_l = track_row.left() + pad;
+    let bar_r = (track_row.right() - pad).max(bar_l + 1.0);
+    if (resp.clicked() || resp.dragged())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let t = ((pos.x - bar_l) / (bar_r - bar_l)).clamp(0.0, 1.0);
+        let raw = 1.8 + t * (45.0 - 1.8);
+        app.vinyl_speed = (raw * 2.0).round() / 2.0;
+        app.vinyl_speed = app.vinyl_speed.clamp(1.8, 45.0);
+    }
+    let frac = ((app.vinyl_speed - 1.8) / (45.0 - 1.8)).clamp(0.0, 1.0);
+    let cy = track_row.center().y;
+    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::unique("accent"))).unwrap_or(theme::RED);
+    let track_rect = Rect::from_min_max(pos2(bar_l, cy - 2.5), pos2(bar_r, cy + 2.5));
+    ui.painter().rect_filled(track_rect, 2.5, theme::glass(0.18));
+    let fill_x = egui::lerp(bar_l..=bar_r, frac);
+    ui.painter().rect_filled(Rect::from_min_max(pos2(bar_l, cy - 2.5), pos2(fill_x, cy + 2.5)), 2.5, accent);
+    ui.painter().circle_filled(pos2(fill_x, cy), if resp.hovered() || resp.dragged() { 7.0 } else { 6.0 }, Color32::WHITE);
+    // Quick speed presets
+    let (preset_row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+    let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(preset_row.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    sub.spacing_mut().item_spacing.x = 4.0;
+    for (label, secs) in [("33⅓", 1.8_f32), ("Normal", 8.0), ("Slow", 20.0), ("Relax", 35.0)] {
+        let on = (app.vinyl_speed - secs).abs() < 0.35;
+        if mini_text(&mut sub, label, on, &format!("{secs:.1} s per turn")).clicked() {
+            app.vinyl_speed = secs;
+        }
     }
 }
 

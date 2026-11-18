@@ -30,6 +30,7 @@ mod responses;
 mod row_drag;
 mod shell;
 mod shuffle;
+mod stats;
 mod titlebar;
 pub use titlebar::{custom as custom_titlebar, init as init_titlebar, inset as titlebar_inset, set_hwnd as set_titlebar_hwnd};
 #[cfg(target_os = "macos")]
@@ -80,6 +81,8 @@ pub enum Page {
     Transfer,
     /// Listen together.
     Jam,
+    /// Listening statistics and Wrapped card (synced with NabyTune).
+    Stats,
 }
 
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
@@ -110,9 +113,10 @@ pub use mini::{init_pill, set_hwnd as set_mini_hwnd};
 
 /// Settings › General › Window › Open on: the pages the app can start on, as saved and
 /// as listed.
-pub(super) const START_PAGES: [(&str, &str, Page); 10] = [
+pub(super) const START_PAGES: [(&str, &str, Page); 11] = [
     ("home", "Home", Page::Home),
     ("explore", "Explore", Page::Explore),
+    ("stats", "Stats", Page::Stats),
     ("library", "Library › Playlists", Page::Library(LibTab::Playlists)),
     ("liked", "Library › Liked songs", Page::Library(LibTab::Songs)),
     ("albums", "Library › Albums", Page::Library(LibTab::Albums)),
@@ -352,6 +356,11 @@ pub struct App {
     /// Local WebSocket for a Stream Deck plugin. Off until Connections enables it.
     remote: crate::remote::Remote,
     remote_enabled: bool,
+    /// FocusGrow & DynamicNotification / Dynamic Island WebSocket bridge (`ws://127.0.0.1:8765`).
+    bridge: Option<crate::bridge::Bridge>,
+    bridge_retry: Option<std::time::Instant>,
+    bridge_track: Option<(String, String, String, u64)>,
+    bridge_playing: Option<bool>,
     /// The Last.fm account scrobbles go to; a sign-in in progress and its outcome.
     lastfm_user: Option<String>,
     lastfm_busy: Arc<AtomicBool>,
@@ -554,6 +563,19 @@ pub struct App {
     reactive_bg: bool,
     /// Bright album art is darkened behind now playing and the pages, for the text over it.
     dim_bright: bool,
+    /// Show the Now Playing cover as a vinyl disc across every theme.
+    vinyl_mode: bool,
+    /// Spin the vinyl disc while playing.
+    vinyl_rotate: bool,
+    /// Seconds per full vinyl revolution (1.8s–45.0s).
+    vinyl_speed: f32,
+    /// Pulse the vinyl disc & its rim halo on bass beats.
+    vinyl_beat: bool,
+    /// Pulse the Now Playing ambient background glow on bass beats.
+    ambient_beat: bool,
+    /// Smoothed beat pulse (0..1) and last frame timestamp for fluid 60–120+ FPS easing.
+    beat_smooth: f32,
+    beat_last_frame: f64,
     /// The progress line's knob shown all the time, not only on hover.
     seek_knob_always: bool,
     /// Skip the parts of music videos SponsorBlock marks as not music.
@@ -717,6 +739,10 @@ pub struct App {
     smoke: Option<String>,
     /// The one part of egui's memory that's saved (see `save`).
     zoom: f32,
+    /// Active listen being timed for local stats (stats.rs).
+    listening: Option<stats::Listening>,
+    /// Stats page state & shared NabyTune sync cache.
+    stats: stats::StatsState,
 }
 
 /// Longest crossfade offered, in seconds.
@@ -794,6 +820,10 @@ impl App {
             artist_pics: HashMap::new(),
             remote: crate::remote::Remote::new(),
             remote_enabled,
+            bridge: None,
+            bridge_retry: None,
+            bridge_track: None,
+            bridge_playing: None,
             lastfm_user: crate::lastfm::user(),
             lastfm_busy: Default::default(),
             lastfm_result: Default::default(),
@@ -957,6 +987,13 @@ impl App {
             glass_on: get("glass_on").is_none_or(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
             dim_bright: get("dim_bright").is_none_or(|v| v == "1"),
+            vinyl_mode: get("vinyl_mode").is_none_or(|v| v == "1"),
+            vinyl_rotate: get("vinyl_rotate").is_none_or(|v| v == "1"),
+            vinyl_speed: get("vinyl_speed").and_then(|v| v.parse::<f32>().ok()).unwrap_or(12.0).clamp(1.8, 45.0),
+            vinyl_beat: get("vinyl_beat").is_none_or(|v| v == "1"),
+            ambient_beat: get("ambient_beat").is_none_or(|v| v == "1"),
+            beat_smooth: 0.0,
+            beat_last_frame: 0.0,
             seek_knob_always: get("seek_knob_always").is_some_and(|v| v == "1"),
             sponsorblock: get("sponsorblock").is_some_and(|v| v == "1"),
             crossfade: get("crossfade").is_some_and(|v| v == "1"),
@@ -1021,6 +1058,8 @@ impl App {
             smoke: None,
             zoom: 1.0,
             home_mood: false,
+            listening: None,
+            stats: stats::StatsState::new(get("wrapped_style").as_deref()),
         };
         app.queue.hide_explicit = hide_explicit;
         app.find.hide_explicit = hide_explicit;
@@ -1062,6 +1101,7 @@ impl App {
             Ok("settings") => app.go(Page::Settings),
             Ok("transfer") => app.go(Page::Transfer),
             Ok("jam") => app.go(Page::Jam),
+            Ok("stats") => app.go(Page::Stats),
             Ok(p) if p.starts_with("album:") => app.go(Page::Album(p[6..].to_owned())),
             Ok(p) if p.starts_with("mood:") => app.go(Page::Mood(p[5..].to_owned())),
             Ok(p) if p.starts_with("artist:") => app.go(Page::Artist(p[7..].to_owned())),
@@ -1174,6 +1214,9 @@ impl App {
                 _ => {}
             }
         }
+        if self.page == Page::Stats {
+            self.stats_sync_check(true);
+        }
         let changed = self.page_changed;
         self.page_loaded();
         self.page_changed = changed;
@@ -1228,6 +1271,10 @@ impl App {
                 None
             }
             Page::Library(_) if self.logged_in => Some(Req::Library),
+            Page::Stats => {
+                self.stats_sync_check(false);
+                None
+            }
             _ => None,
         };
         // The spinner is only for a page with nothing to show yet.
@@ -1528,10 +1575,12 @@ impl eframe::App for App {
             self.restore_art();
         }
         self.sync_remote(ctx);
+        self.sync_bridge(ctx, frame);
         self.sync_tempo();
         self.sync_discord(ctx);
         self.sync_song_notification(ctx);
         self.sync_scrobbles();
+        self.stats_tick(ctx);
         self.sync_server_queue(ctx, now);
         self.tick_updates(ctx, now);
         let np = widgets::NowPlaying {
@@ -2006,6 +2055,11 @@ impl eframe::App for App {
         storage.set_string("glass_on", b(self.glass_on));
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("dim_bright", b(self.dim_bright));
+        storage.set_string("vinyl_mode", b(self.vinyl_mode));
+        storage.set_string("vinyl_rotate", b(self.vinyl_rotate));
+        storage.set_string("vinyl_speed", format!("{:.1}", self.vinyl_speed));
+        storage.set_string("vinyl_beat", b(self.vinyl_beat));
+        storage.set_string("ambient_beat", b(self.ambient_beat));
         storage.set_string("seek_knob_always", b(self.seek_knob_always));
         storage.set_string("sponsorblock", b(self.sponsorblock));
         storage.set_string("crossfade", b(self.crossfade));
@@ -2027,6 +2081,7 @@ impl eframe::App for App {
             self.lyric_prefs.save(storage);
         }
         storage.set_string("np_art", b(self.np_tab == NpTab::Art));
+        storage.set_string("wrapped_style", self.stats.style.key().to_owned());
         // Background test runs leave the user's real "last song" alone unless asked.
         let test_run = std::env::var_os("YTM_BACKGROUND").is_some() && std::env::var_os("YTM_SAVE_SESSION").is_none();
         if let Some(s) = self.session_json().filter(|_| !test_run) {
@@ -2035,6 +2090,8 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.bridge = None;
+        self.stats_flush();
         self.settle_now();
         if let (Some(bg), Some(gl)) = (&self.bg, gl) {
             bg.destroy(gl);

@@ -391,7 +391,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), nav_h), Sense::click());
         let mut resp = named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
         // Clicking the page you're on reloads it; say so where that loads anything.
-        if page == p && (matches!(page, Page::Home | Page::Explore) || (logged_in && matches!(page, Page::Library(_)))) {
+        if page == p && (matches!(page, Page::Home | Page::Explore | Page::Stats) || (logged_in && matches!(page, Page::Library(_)))) {
             resp = resp.on_hover_text("Refresh (F5)");
         } else if collapsed && !item.rail_labels {
             resp = resp.on_hover_text(label);
@@ -433,6 +433,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     nav(ui, icon::HOUSE, "Home", Page::Home, p == Page::Home, &mut go_to);
     nav(ui, icon::COMPASS, "Explore", Page::Explore, matches!(p, Page::Explore | Page::Mood(_)), &mut go_to);
     nav(ui, icon::LIBRARY, "Library", Page::Library(LibTab::Playlists), matches!(p, Page::Library(_)), &mut go_to);
+    nav(ui, icon::STATS, "Stats", Page::Stats, p == Page::Stats, &mut go_to);
     let jam_label = match app.jam.member_count() {
         n if app.jam.active() && n > 0 => format!("Jam · {n} listening"),
         _ => "Listen together".to_owned(),

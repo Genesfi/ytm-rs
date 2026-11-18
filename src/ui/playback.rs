@@ -401,6 +401,13 @@ impl App {
         self.request_art();
         self.refresh_lyrics(shown);
         self.top_up();
+        // Listening stats: a new play flushes the previous one and starts timing this song;
+        // resuming a restored session starts timing without flushing an ongoing swap/recovery.
+        if report {
+            self.stats_start();
+        } else if !swap {
+            self.stats_ensure_started();
+        }
     }
 
     /// The playing track's title, artist and length for the system's media controls,

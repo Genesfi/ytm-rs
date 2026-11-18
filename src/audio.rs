@@ -90,6 +90,8 @@ pub struct AudioStatus {
     log_volume: AtomicBool,
     /// Smoothed output loudness 0..1 (f32 bits), for audio-reactive visuals.
     level: AtomicU32,
+    /// Bass-kick beat impulse 0..1 (f32 bits), for vinyl & ambient beat visuals.
+    beat: AtomicU32,
     /// How far the output device runs behind the position (its buffer), in ms.
     latency_ms: AtomicU32,
     /// Crossfade length in ms; 0 = off.
@@ -163,6 +165,14 @@ impl AudioStatus {
         f32::from_bits(self.level.load(Ordering::Relaxed))
     }
 
+    /// Bass-kick beat impulse 0..1; 0 while paused.
+    pub fn beat(&self) -> f32 {
+        if !self.playing.load(Ordering::Relaxed) {
+            return 0.0;
+        }
+        f32::from_bits(self.beat.load(Ordering::Relaxed))
+    }
+
     fn set_position(&self, ms: u64) {
         self.position_ms.store(ms, Ordering::Relaxed);
         self.sampled_at.store(now_ms(), Ordering::Relaxed);
@@ -216,6 +226,16 @@ struct Meter<S> {
     acc: f32,
     n: u32,
     smooth: f32,
+    // Bass-kick beat detector (2-pole 180 Hz low-pass + onset vs moving average).
+    lp_alpha: f32,
+    lp1: f32,
+    lp2: f32,
+    bass_acc: f32,
+    bass_avg: f32,
+    bass_recent: [f32; 6],
+    beat: f32,
+    beat_cooldown: f32,
+    win_dt: f32,
 }
 
 impl<S: rodio::Source> Meter<S> {
@@ -223,7 +243,31 @@ impl<S: rodio::Source> Meter<S> {
         // A decoder put in mid-fade (a seek's) carries on from there; while paused, from silence.
         let pause = 1.0 - f32::from_bits(status.faded.load(Ordering::Relaxed));
         let seen_silenced = status.silenced.load(Ordering::Relaxed);
-        let mut m = Self { inner, status, fade_out, seen_out: 0, ramp: None, pause, pause_step: 0.0, seen_silenced, acc: 0.0, n: 0, smooth: 0.0 };
+        let rate_total = (inner.sample_rate().get() as f32 * inner.channels().get() as f32).max(1.0);
+        let lp_alpha = (1.0 - (-std::f32::consts::TAU * 180.0 / rate_total).exp()).clamp(0.001, 0.5);
+        let win_dt = 2048.0 / rate_total;
+        let mut m = Self {
+            inner,
+            status,
+            fade_out,
+            seen_out: 0,
+            ramp: None,
+            pause,
+            pause_step: 0.0,
+            seen_silenced,
+            acc: 0.0,
+            n: 0,
+            smooth: 0.0,
+            lp_alpha,
+            lp1: 0.0,
+            lp2: 0.0,
+            bass_acc: 0.0,
+            bass_avg: 0.0,
+            bass_recent: [0.0; 6],
+            beat: 0.0,
+            beat_cooldown: 0.0,
+            win_dt,
+        };
         m.pause_step = 1.0 / m.samples(PAUSE_FADE_MS) as f32;
         if fade_in_ms > 0 {
             m.ramp = Some(Ramp::In { at: 0, len: m.samples(fade_in_ms) });
@@ -279,17 +323,42 @@ impl<S: rodio::Source> Iterator for Meter<S> {
         }
         s *= self.pause;
         self.acc += s * s;
+        // 2-pole low-pass at ~180 Hz isolates kick drums & sub-bass for the beat detector.
+        self.lp1 += self.lp_alpha * (s - self.lp1);
+        self.lp2 += self.lp_alpha * (self.lp1 - self.lp2);
+        self.bass_acc += self.lp2 * self.lp2;
         self.n += 1;
         if self.n == 2048 {
             let rms = (self.acc / 2048.0).sqrt();
             // Fast attack, slow release, like a VU meter.
             let k = if rms > self.smooth { 0.6 } else { 0.08 };
             self.smooth += (rms - self.smooth) * k;
+
+            let dt = self.win_dt;
+            let bass = self.bass_acc / 2048.0;
+            self.beat *= (-dt / 0.11).exp();
+            self.beat_cooldown = (self.beat_cooldown - dt).max(0.0);
+            if bass > 5e-5 && self.pause > 0.5 {
+                let ratio = bass / self.bass_avg.max(1e-6);
+                let recent_min = self.bass_recent.iter().copied().fold(f32::INFINITY, f32::min);
+                let rise = bass / recent_min.max(1e-7);
+                if ratio > 1.50 && rise > 1.45 && self.beat_cooldown <= 0.0 {
+                    let strength = ((ratio - 1.50) / 3.0).clamp(0.0, 1.0);
+                    self.beat = self.beat.max(0.55 + 0.45 * strength);
+                    self.beat_cooldown = 0.18;
+                }
+            }
+            self.bass_avg += (bass - self.bass_avg) * (1.0 - (-dt / 1.0).exp());
+            self.bass_recent.rotate_left(1);
+            self.bass_recent[5] = bass;
+
             // A song fading out is no longer the one the visuals follow.
             if self.seen_out == 0 {
                 self.status.level.store(self.smooth.min(1.0).to_bits(), Ordering::Relaxed);
+                self.status.beat.store(self.beat.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
             }
             self.acc = 0.0;
+            self.bass_acc = 0.0;
             self.n = 0;
         }
         Some(s)
@@ -1412,5 +1481,40 @@ mod tests {
         assert!((audio.volume() - 0.5).abs() < 1e-6);
         audio.set_log_volume(false);
         assert!((audio.volume() - 0.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn beat_detects_kicks_not_steady_noise() {
+        let sr = 48_000u32;
+        let samples_per_sec = sr as usize * 2;
+        // 3 seconds of 60 Hz kick every 0.5 s over a quiet bed.
+        let mut kicks = Vec::with_capacity(samples_per_sec * 3);
+        for f in 0..(sr as usize * 3) {
+            let t_beat = (f % (sr as usize / 2)) as f32 / sr as f32;
+            let env = (-t_beat / 0.06).exp();
+            let v = if t_beat < 0.12 { (std::f32::consts::TAU * 60.0 * t_beat).sin() * env * 0.85 } else { 0.0 };
+            kicks.push(v);
+            kicks.push(v);
+        }
+        let status = Arc::new(AudioStatus::default());
+        status.playing.store(true, Ordering::Relaxed);
+        let fade = Arc::new(AtomicU32::new(0));
+        let src = rodio::buffer::SamplesBuffer::new(std::num::NonZero::new(2).unwrap(), std::num::NonZero::new(sr).unwrap(), kicks);
+        let mut meter = Meter::new(src, status.clone(), 0, fade);
+        let mut peak = 0.0f32;
+        let mut triggers = 0usize;
+        let mut high = false;
+        while meter.next().is_some() {
+            let b = status.beat();
+            peak = peak.max(b);
+            if b > 0.5 && !high {
+                triggers += 1;
+                high = true;
+            } else if b < 0.25 {
+                high = false;
+            }
+        }
+        assert!(peak > 0.55, "expected kick beat peak, got {peak}");
+        assert!(triggers >= 4, "expected at least 4 kick triggers in 3s, got {triggers}");
     }
 }

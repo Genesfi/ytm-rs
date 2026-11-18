@@ -11,6 +11,7 @@ mod awake;
 mod backdrop;
 mod backend;
 mod bidi;
+mod bridge;
 mod cache;
 mod canvas;
 mod deeplink;
@@ -33,6 +34,7 @@ mod preset;
 mod remote;
 mod shader;
 mod sponsorblock;
+mod stats;
 mod stream;
 mod theme;
 mod transfer;
@@ -236,6 +238,7 @@ fn main() -> eframe::Result {
             let (media_tx, media_rx) = unbounded();
             if let Some(h) = hwnd(cc) {
                 appicon::set_hwnd(h);
+                bridge::set_hwnd(h);
                 fullscreen::set_hwnd(h);
                 // Weak: a strong hold kept the window from closing, and eframe ends its loop
                 // only once it has, so Quit from the tray left the process running (#153).

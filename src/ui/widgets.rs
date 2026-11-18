@@ -245,6 +245,21 @@ pub fn linked_text(
 }
 
 pub fn icon_at(ui: &Ui, center: Pos2, glyph: char, size: f32, color: Color32) {
+    if glyph == icon::STATS {
+        // Lucide bar-chart-2 on a 24-unit grid, centred on (12, 12).
+        let unit = size / 24.0;
+        let at = |x: f32, y: f32| center + vec2(x - 12.0, y - 12.0) * unit;
+        let stroke = egui::Stroke::new((2.1 * unit).max(1.5), color);
+        let p = ui.painter();
+        for (x, top) in [(6.0, 14.0), (12.0, 4.0), (18.0, 10.0)] {
+            let a = at(x, top);
+            let b = at(x, 20.0);
+            p.line_segment([a, b], stroke);
+            p.circle_filled(a, stroke.width * 0.5, color);
+            p.circle_filled(b, stroke.width * 0.5, color);
+        }
+        return;
+    }
     // A theme's own icon for it. Most have none.
     if !crate::preset::active().app.icons.is_empty() && super::vector::name_of(glyph).is_some_and(|name| super::vector::paint(ui, name, center, size * 1.1, color)) {
         return;

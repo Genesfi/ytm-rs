@@ -927,6 +927,8 @@ pub mod icon {
     pub const PIN_OFF: char = '\u{e2b6}';
     pub const PICTURE_IN_PICTURE: char = '\u{e3af}';
     pub const MAXIMIZE_2: char = '\u{e113}';
+    /// Custom vector-painted bar-chart icon (handled by `ui::widgets::icon_at`).
+    pub const STATS: char = '\u{e900}';
 }
 
 /// Inter (SIL OFL 1.1), the default face: regular / semibold / extra bold, subset to

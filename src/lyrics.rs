@@ -30,9 +30,11 @@ pub enum Provider {
     UnisonWord,
     PortatoRich,
     MusixmatchRich,
+    NeteaseRich,
     BLyricsSynced,
     UnisonSynced,
     BinimumSynced,
+    NeteaseSynced,
     LrclibSynced,
     LegatoSynced,
     MusixmatchSynced,
@@ -50,16 +52,18 @@ pub enum SyncKind {
 }
 
 impl Provider {
-    pub const ALL: [Provider; 14] = [
+    pub const ALL: [Provider; 16] = [
         Provider::BLyricsRich,
         Provider::UnisonRich,
         Provider::BinimumRich,
         Provider::UnisonWord,
         Provider::PortatoRich,
         Provider::MusixmatchRich,
+        Provider::NeteaseRich,
         Provider::BLyricsSynced,
         Provider::UnisonSynced,
         Provider::BinimumSynced,
+        Provider::NeteaseSynced,
         Provider::LrclibSynced,
         Provider::LegatoSynced,
         Provider::MusixmatchSynced,
@@ -76,9 +80,11 @@ impl Provider {
             Provider::UnisonWord => "unison-wordsynced",
             Provider::PortatoRich => "portato-richsynced",
             Provider::MusixmatchRich => "musixmatch-richsync",
+            Provider::NeteaseRich => "netease-richsync",
             Provider::BLyricsSynced => "bLyrics-synced",
             Provider::UnisonSynced => "unison-synced",
             Provider::BinimumSynced => "binimum-synced",
+            Provider::NeteaseSynced => "netease-synced",
             Provider::LrclibSynced => "lrclib-synced",
             Provider::LegatoSynced => "legato-synced",
             Provider::MusixmatchSynced => "musixmatch-synced",
@@ -98,6 +104,7 @@ impl Provider {
             Provider::BinimumRich | Provider::BinimumSynced => "BiniLyrics",
             Provider::PortatoRich => "Better Lyrics Portato",
             Provider::MusixmatchRich | Provider::MusixmatchSynced => "Musixmatch",
+            Provider::NeteaseRich | Provider::NeteaseSynced => "NetEase",
             Provider::LrclibSynced | Provider::LrclibPlain => "LRCLib",
             Provider::LegatoSynced => "Better Lyrics Legato",
         }
@@ -106,10 +113,11 @@ impl Provider {
     pub fn sync(self) -> SyncKind {
         match self {
             Provider::BLyricsRich | Provider::UnisonRich | Provider::BinimumRich => SyncKind::Syllable,
-            Provider::UnisonWord | Provider::PortatoRich | Provider::MusixmatchRich => SyncKind::Word,
+            Provider::UnisonWord | Provider::PortatoRich | Provider::MusixmatchRich | Provider::NeteaseRich => SyncKind::Word,
             Provider::BLyricsSynced
             | Provider::UnisonSynced
             | Provider::BinimumSynced
+            | Provider::NeteaseSynced
             | Provider::LrclibSynced
             | Provider::LegatoSynced
             | Provider::MusixmatchSynced => SyncKind::Line,
@@ -242,12 +250,12 @@ impl Client {
         }
     }
 
-    /// Every source's lyrics for a song: the Better Lyrics stream and Unison, together.
+    /// Every source's lyrics for a song: the Better Lyrics stream, Unison, and NetEase together.
     pub async fn fetch(&self, q: &Query<'_>) -> anyhow::Result<LyricsSet> {
         if let Some((_, l)) = self.recent.lock().unwrap().iter().find(|(id, _)| id == q.video_id) {
             return Ok(l.clone());
         }
-        let (stream, unison) = tokio::join!(self.fetch_stream(q), self.fetch_unison(q));
+        let (stream, unison, netease) = tokio::join!(self.fetch_stream(q), self.fetch_unison(q), self.fetch_netease(q));
         let mut sources = Vec::new();
         match stream {
             Ok(s) => sources.extend(s),
@@ -256,6 +264,10 @@ impl Client {
         match unison {
             Ok(s) => sources.extend(s),
             Err(e) => log::info!("unison: {e:#}"),
+        }
+        match netease {
+            Ok(s) => sources.extend(s),
+            Err(e) => log::info!("netease: {e:#}"),
         }
         if sources.is_empty() {
             return Ok(LyricsSet::default());
@@ -313,6 +325,151 @@ impl Client {
         Ok(from_unison(&v["data"], q.duration.unwrap_or(0) as i32 * 1000))
     }
 
+    async fn fetch_netease(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
+        let clean_title = clean_netease_query(q.song);
+        let clean_artist = clean_netease_query(q.artist.split(['/', ',', '&']).next().unwrap_or(q.artist));
+        if clean_title.is_empty() {
+            return Ok(vec![]);
+        }
+        let target_ms = q.duration.unwrap_or(0) as i64 * 1000;
+        let mut queries: Vec<String> = Vec::new();
+        if !clean_artist.is_empty() {
+            queries.push(format!("{clean_title} {clean_artist}"));
+            if q.song.trim() != clean_title {
+                queries.push(format!("{} {clean_artist}", q.song.trim()));
+            }
+        }
+        queries.push(clean_title.clone());
+        queries.dedup();
+
+        let t_low = clean_title.to_lowercase();
+        let a_low = clean_artist.to_lowercase();
+        let mut ranked: Vec<(f32, i64)> = Vec::new();
+        let mut seen_ids: Vec<i64> = Vec::new();
+
+        for query in queries {
+            let resp = self
+                .http
+                .get("https://music.163.com/api/search/get/")
+                .query(&[("s", query.as_str()), ("type", "1"), ("limit", "10")])
+                .header("Referer", "https://music.163.com")
+                .header("Cookie", "os=pc")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .timeout(Duration::from_secs(8))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                continue;
+            }
+            let v: Value = resp.json().await?;
+            let Some(songs) = v["result"]["songs"].as_array() else { continue };
+            let mut strong_hit = false;
+            for s in songs {
+                let Some(id) = s["id"].as_i64() else { continue };
+                if seen_ids.contains(&id) {
+                    continue;
+                }
+                seen_ids.push(id);
+                let name = s["name"].as_str().unwrap_or("").to_lowercase();
+                let clean_name = clean_netease_query(&name).to_lowercase();
+                let dur = s["duration"].as_i64().unwrap_or(0);
+                let artist_match = s["artists"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|a| a["name"].as_str())
+                            .any(|n| {
+                                let nl = n.to_lowercase();
+                                !a_low.is_empty() && (nl.contains(&a_low) || a_low.contains(&nl))
+                            })
+                    })
+                    .unwrap_or(false);
+                let mut score = 0.0f32;
+                if name == t_low || clean_name == t_low {
+                    score += 60.0;
+                } else if name.contains(&t_low) || t_low.contains(&clean_name) && clean_name.chars().count() >= 2 {
+                    score += 35.0;
+                } else {
+                    // Reject unrelated song titles
+                    continue;
+                }
+                if artist_match {
+                    score += 30.0;
+                }
+                if target_ms > 0 && dur > 0 {
+                    let diff_s = (dur - target_ms).abs() as f32 / 1000.0;
+                    if diff_s <= 3.0 {
+                        score += 30.0;
+                    } else if diff_s <= 8.0 {
+                        score += 15.0;
+                    } else if diff_s > 35.0 {
+                        score -= 25.0;
+                    }
+                }
+                if score >= 75.0 {
+                    strong_hit = true;
+                }
+                ranked.push((score, id));
+            }
+            if strong_hit {
+                break;
+            }
+        }
+
+        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let song_ms = q.duration.unwrap_or(0) as i32 * 1000;
+        let mut found: Vec<Lyrics> = Vec::new();
+        for (_, id) in ranked.into_iter().take(4) {
+            let resp = self
+                .http
+                .get("https://music.163.com/api/song/lyric")
+                .query(&[
+                    ("id", id.to_string()),
+                    ("lv", "1".into()),
+                    ("kv", "1".into()),
+                    ("tv", "-1".into()),
+                    ("yv", "1".into()),
+                    ("ytv", "-1".into()),
+                    ("yrv", "-1".into()),
+                ])
+                .header("Referer", "https://music.163.com")
+                .header("Cookie", "os=pc")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .timeout(Duration::from_secs(8))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                continue;
+            }
+            let v: Value = resp.json().await?;
+            // 1. Word-by-word karaoke (`yrc.lyric`) when available
+            if let Some(yrc_raw) = v["yrc"]["lyric"].as_str().filter(|s| !s.trim().is_empty()) {
+                let yrc_lines = parse_yrc(yrc_raw, song_ms);
+                if derive_sync(&yrc_lines) == Sync::Word {
+                    if let Some(lyrics) = Lyrics::new(Provider::NeteaseRich, yrc_lines, None, vec![]) {
+                        found.push(lyrics);
+                    }
+                }
+            }
+            // 2. Standard line-synced LRC (`lrc.lyric`)
+            if let Some(raw) = v["lrc"]["lyric"].as_str().filter(|s| !s.trim().is_empty()) {
+                let mut lines = parse_lrc(raw, song_ms);
+                lrc_fixers(&mut lines);
+                if derive_sync(&lines) != Sync::None {
+                    let writers = lrc_songwriters(raw);
+                    if let Some(lyrics) = Lyrics::new(Provider::NeteaseSynced, lines, None, writers) {
+                        found.push(lyrics);
+                    }
+                }
+            }
+            if !found.is_empty() {
+                break;
+            }
+        }
+        Ok(found)
+    }
+
     /// A valid JWT, from cache or by running the Turnstile challenge.
     async fn token(&self, force_new: bool) -> anyhow::Result<String> {
         let mut slot = self.jwt.lock().await;
@@ -346,6 +503,115 @@ impl Client {
         *slot = Some(jwt.clone());
         Ok(jwt)
     }
+}
+
+fn clean_netease_query(raw: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for ch in raw.chars() {
+        match ch {
+            '(' | '[' | '（' | '【' | '『' | '「' => depth += 1,
+            ')' | ']' | '）' | '】' | '』' | '」' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    let trimmed = out
+        .split(" - ")
+        .next()
+        .unwrap_or(&out)
+        .split(" / ")
+        .next()
+        .unwrap_or(&out)
+        .split(" | ")
+        .next()
+        .unwrap_or(&out)
+        .trim_matches(|c: char| c == '.' || c == '…' || c == '-' || c.is_whitespace());
+    let cleaned = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        raw.trim().to_owned()
+    } else {
+        cleaned
+    }
+}
+
+/// Parses NetEase word-by-word karaoke (`yrc.lyric`):
+/// `[line_start_ms,line_dur_ms](word_start_ms,word_dur_ms,0)word...`
+fn parse_yrc(raw: &str, song_ms: i32) -> Vec<Line> {
+    fn parse_yrc_token(s: &str) -> Option<(i32, i32, usize)> {
+        let rest = s.strip_prefix('(')?;
+        let close = rest.find(')')?;
+        let inner = &rest[..close];
+        let mut nums = inner.split(',');
+        let start = nums.next()?.trim().parse::<i32>().ok()?;
+        let dur = nums.next()?.trim().parse::<i32>().ok()?;
+        // NetEase YRC always has 3 comma-separated integers `(start,dur,0)`
+        let _flag = nums.next()?.trim().parse::<i32>().ok()?;
+        if nums.next().is_some() {
+            return None;
+        }
+        Some((start, dur.max(1), close + 2))
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    for raw_line in raw.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('{') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix('[') else { continue };
+        let Some(end_bracket) = rest.find(']') else { continue };
+        let header = &rest[..end_bracket];
+        let mut h_parts = header.split(',');
+        let (Some(start_s), Some(dur_s)) = (h_parts.next(), h_parts.next()) else { continue };
+        let (Ok(line_start), Ok(line_dur)) = (start_s.trim().parse::<i32>(), dur_s.trim().parse::<i32>()) else { continue };
+
+        let body = &rest[end_bracket + 1..];
+        let mut parts: Vec<Part> = Vec::new();
+        let mut full_text = String::new();
+        let mut pos = 0usize;
+        while pos < body.len() {
+            if let Some((w_start, w_dur, consumed)) = parse_yrc_token(&body[pos..]) {
+                let text_start = pos + consumed;
+                let mut text_end = body.len();
+                let mut scan = text_start;
+                while let Some(rel) = body[scan..].find('(') {
+                    let cand = scan + rel;
+                    if parse_yrc_token(&body[cand..]).is_some() {
+                        text_end = cand;
+                        break;
+                    }
+                    scan = cand + 1;
+                }
+                let word_text = &body[text_start..text_end];
+                if !word_text.is_empty() {
+                    full_text.push_str(word_text);
+                    parts.push(Part {
+                        start: w_start,
+                        dur: w_dur,
+                        text: word_text.to_owned(),
+                        bg: false,
+                    });
+                }
+                pos = text_end;
+            } else {
+                // Skip any leading non-token characters safely
+                let next_char_len = body[pos..].chars().next().map_or(1, char::len_utf8);
+                pos += next_char_len;
+            }
+        }
+        if !full_text.trim().is_empty() && !parts.is_empty() {
+            lines.push(Line {
+                start: line_start,
+                dur: line_dur.max(1),
+                text: full_text.trim().to_owned(),
+                parts,
+                ..Default::default()
+            });
+        }
+    }
+    lines.sort_by_key(|l| l.start);
+    insert_instrumentals(lines, song_ms)
 }
 
 fn jwt_seconds_left(jwt: &str) -> i64 {
