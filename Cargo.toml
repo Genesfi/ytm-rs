@@ -1,6 +1,6 @@
 [package]
 name = "ytm-rs"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/grapedjuice/ytm-rs"
@@ -51,8 +51,14 @@ unicode-normalization = "0.1.26"
 symphonia = { version = "0.5.5", default-features = false, features = ["mkv", "aac"] }
 rusty-opus = "1.0.2"
 unicode-bidi = "0.3"
+# Cutting the tray menu's song line between letters a reader sees as one (tray.rs).
+unicode-segmentation = "1.13.3"
 # System-wide media shortcuts (hotkeys.rs).
 global-hotkey = "0.9"
+# The interface in the listener's language, from locales/, built in (i18n.rs).
+fluent-templates = "0.15.1"
+# The system's languages, for the default one.
+sys-locale = "0.3.2"
 
 [target.'cfg(windows)'.dependencies]
 # Windows Credential Manager, for the Google and Spotify sign-ins.
@@ -101,6 +107,9 @@ winresource = "0.1.31"
 # in vendor/epaint/src/text/text_layout.rs.
 # souvlaki with its Linux media controls sending changes as they happen, not one a
 # second (#144): see the ytm-rs notes in vendor/souvlaki/src/platform/mpris/dbus/controls.rs.
+# winit with X11 windows taking a scale that changes after they open (#208): see the
+# ytm-rs notes in vendor/winit/src/platform_impl/linux/x11/window.rs.
 [patch.crates-io]
 epaint = { path = "vendor/epaint" }
 souvlaki = { path = "vendor/souvlaki" }
+winit = { path = "vendor/winit" }

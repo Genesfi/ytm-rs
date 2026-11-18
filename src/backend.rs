@@ -52,6 +52,7 @@ pub enum Req {
     SwitchChannel { page_id: Option<String>, epoch: u64 },
     /// The queue another device left off with (YouTube Music's own cross-device queue).
     ServerQueue,
+    SongRating { video_id: String, round: u64 },
     /// Upload audio files to the account's library.
     Upload(Vec<PathBuf>),
     /// Save a song's audio to the downloads folder. `for_video`: the music video it's the
@@ -103,10 +104,10 @@ pub enum Req {
     /// Take away the likes of a music video and the song version standing in for it.
     UnlikeBoth { song: String, video: String },
     /// Take away just this like, not the other half's.
-    Unlike(String),
     /// Several likes (or unlikes) one after another, for a selection.
     LikeMany { video_ids: Vec<String>, like: bool, stand_ins: std::collections::HashMap<String, String> },
-    Dislike(String),
+    Dislike { video_id: String, skip_generation: Option<u64> },
+    RemoveRating { video_id: String, was_disliked: bool },
     CreatePlaylist { title: String, video_ids: Vec<String> },
     EditPlaylist { id: String, title: String, description: String, privacy: Option<String> },
     /// Save one of your playlist's sort orders to it ([`PlaylistSort::actions`]).
@@ -117,6 +118,8 @@ pub enum Req {
     /// Move an entry to just before another, or to the end.
     MoveInPlaylist { playlist_id: String, move_id: u64, set_id: String, before: Option<String> },
     DeletePlaylist(String),
+    /// An uploaded song (`Track::upload`), and its title for the error.
+    DeleteUpload { entity: String, title: String },
     /// A playlist's collaboration settings and invite link.
     Collaboration(String),
     SetCollaboration { info: ytm::Collaboration, change: ytm::CollabChange },
@@ -146,6 +149,7 @@ impl Req {
             Req::Channels => "Channels",
             Req::SwitchChannel { .. } => "Switching channel",
             Req::ServerQueue => "Queue from other devices",
+            Req::SongRating { .. } => "Song rating",
             Req::Upload(_) => "Upload",
             Req::Download { .. } | Req::DownloadMany { .. } => "Download",
             Req::Lyrics(_) => "Lyrics",
@@ -160,8 +164,9 @@ impl Req {
             Req::Prefetch { .. } => "Prefetch",
             Req::VideoStream { .. } | Req::MusicVideo(_) => "Video",
             Req::Canvas(_) => "Animated cover",
-            Req::Like { .. } | Req::LikeMany { .. } | Req::UnlikeBoth { .. } | Req::Unlike(_) => "Like",
-            Req::Dislike(_) => "Dislike",
+            Req::Like { .. } | Req::LikeMany { .. } | Req::UnlikeBoth { .. } => "Like",
+            Req::Dislike { .. } => "Dislike",
+            Req::RemoveRating { .. } => "Remove rating",
             Req::CreatePlaylist { .. } => "Create playlist",
             Req::EditPlaylist { .. } => "Edit playlist",
             Req::SortPlaylist { .. } => "Sort playlist",
@@ -169,6 +174,7 @@ impl Req {
             Req::RemoveFromPlaylist { .. } => "Remove from playlist",
             Req::MoveInPlaylist { .. } => "Move in playlist",
             Req::DeletePlaylist(_) => "Delete playlist",
+            Req::DeleteUpload { .. } => "Delete upload",
             Req::Collaboration(_) => "Loading collaboration",
             Req::SetCollaboration { .. } => "Collaboration",
             Req::SaveCollection { .. } => "Save to library",
@@ -180,7 +186,7 @@ impl Req {
 
     /// Background requests fail quietly (logged, no toast).
     fn quiet(&self) -> bool {
-        matches!(self, Req::Suggest { .. } | Req::Account | Req::Channels | Req::ServerQueue | Req::Art { .. } | Req::Prefetch { .. } | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::ArtistPicture { .. } | Req::MusicVideo(_) | Req::LyricsExtras { .. } | Req::Comments { .. } | Req::CommentsPage { .. } | Req::CommentAction { .. })
+        matches!(self, Req::Suggest { .. } | Req::Account | Req::Channels | Req::ServerQueue | Req::SongRating { .. } | Req::Art { .. } | Req::Prefetch { .. } | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::ArtistPicture { .. } | Req::MusicVideo(_) | Req::LyricsExtras { .. } | Req::Comments { .. } | Req::CommentsPage { .. } | Req::CommentAction { .. })
     }
 }
 
@@ -363,6 +369,8 @@ pub enum Resp {
     Library(Library),
     History(Vec<Track>),
     Uploads(Vec<Track>),
+    /// An upload was deleted: the uploads as they are now.
+    UploadDeleted(Vec<Track>),
     Account { name: Option<String>, photo: Option<String> },
     Channels(Channels),
     /// A `Req::SwitchChannel` is done (requests go as `epoch` now), or `error` says why it isn't.
@@ -393,6 +401,9 @@ pub enum Resp {
     PlayQueue { target: Target, title: String, tracks: Vec<Track> },
     /// `other`: its other version, whose like went with this one.
     Liked { video_id: String, like: bool, other: Option<String> },
+    Disliked { video_id: String, skip_generation: Option<u64>, ok: bool },
+    RatingRemoved { video_id: String, was_disliked: bool, ok: bool },
+    SongRating { video_id: String, round: u64, rating: Option<ytm::SongRating> },
     /// A run of likes or unlikes: `taken` just went through, `done` of `total` tried.
     LikeProgress { taken: Vec<String>, done: usize, total: usize, like: bool },
     /// The songs YouTube Music took, and the ones it refused.
@@ -439,6 +450,9 @@ impl Resp {
                 | Resp::Channels(_)
                 | Resp::ServerQueue(_)
                 | Resp::Liked { .. }
+                | Resp::Disliked { .. }
+                | Resp::RatingRemoved { .. }
+                | Resp::SongRating { .. }
                 | Resp::LikeProgress { .. }
                 | Resp::LikedMany { .. }
                 | Resp::AddedToPlaylist { .. }
@@ -1110,6 +1124,17 @@ impl Backend {
                     Some(q) => Resp::ServerQueue(q),
                     None => return Ok(None),
                 },
+                Req::SongRating { video_id, round } => {
+                    let rating = match tokio::time::timeout(std::time::Duration::from_secs(10), ytm::song_rating(api, &video_id)).await {
+                        Ok(Ok(rating)) => rating,
+                        Ok(Err(e)) => {
+                            log::debug!("song rating of {video_id}: {e:#}");
+                            None
+                        }
+                        Err(_) => None,
+                    };
+                    Resp::SongRating { video_id, round, rating }
+                }
                 Req::Upload(files) => self.upload(&files).await?,
                 Req::Lyrics(track) => {
                     let video_id = track.id.clone();
@@ -1162,35 +1187,23 @@ impl Backend {
                     // song itself. The lookup is shared with its play's (one per video).
                     let song = self.song_version(&seed, song_of.as_ref(), PREFETCH_SONG_WAIT).await;
                     let from = song.as_ref().map_or(&seed, |s| &s.id);
-                    // Prefer the signed-in account's personalised radio (as music.youtube.com
-                    // does) so autoplay matches the listener's taste instead of falling back to
-                    // generic global tracks; fall back to signed-out only if empty or unavailable.
+                    // Signed in, the account's own radio, as music.youtube.com plays it: it
+                    // follows what the account listens to, so it isn't the same list each time.
                     const RADIO_LIMIT: usize = 25;
-                    let tracks = if me {
-                        match ytm::radio(api, from, true, RADIO_LIMIT).await {
-                            Ok(mut t) => {
-                                t.retain(|x| x.id != *from);
-                                if t.is_empty() {
-                                    log::info!("radio for {from}: none signed in; falling back to signed out");
-                                    let mut alt = ytm::radio(api, from, false, RADIO_LIMIT).await?;
-                                    alt.retain(|x| x.id != *from);
-                                    alt
-                                } else {
-                                    t
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("radio for {from}: signed-in failed ({e:#}); falling back to signed out");
-                                let mut alt = ytm::radio(api, from, false, RADIO_LIMIT).await?;
-                                alt.retain(|x| x.id != *from);
-                                alt
-                            }
-                        }
+                    let mut tracks = if me {
+                        ytm::radio(api, from, true, RADIO_LIMIT).await.unwrap_or_else(|e| {
+                            log::info!("radio for {from}: signed in failed ({e:#}); asking signed out");
+                            Vec::new()
+                        })
                     } else {
-                        let mut t = ytm::radio(api, from, false, RADIO_LIMIT).await?;
-                        t.retain(|x| x.id != *from);
-                        t
+                        Vec::new()
                     };
+                    // The radio starts with its seed, which is playing already.
+                    tracks.retain(|t| t.id != *from);
+                    if tracks.is_empty() {
+                        tracks = ytm::radio(api, from, false, RADIO_LIMIT).await?;
+                        tracks.retain(|t| t.id != *from);
+                    }
                     log::info!("radio for {from}: {} songs", tracks.len());
                     Resp::Radio { seed, tracks }
                 }
@@ -1272,22 +1285,20 @@ impl Backend {
                         Resp::LikedMany { video_ids, failed, like: false, others: Vec::new() }
                     }
                 }
-                Req::Unlike(video_id) => match ytm::set_like(api, &video_id, false).await {
-                    Ok(_) => Resp::Liked { video_id, like: false, other: None },
-                    Err(e) => {
-                        log::warn!("unliking {video_id}: {e:#}");
-                        Resp::LikedMany { video_ids: Vec::new(), failed: vec![video_id], like: false, others: Vec::new() }
-                    }
-                },
                 Req::LikeMany { video_ids, like, stand_ins } => self.like_many(video_ids, like, stand_ins).await?,
-                Req::Dislike(video_id) => {
-                    match ytm::dislike(api, &video_id).await {
-                        Ok(_) => Resp::Liked { video_id, like: false, other: None },
-                        Err(e) => {
-                            log::warn!("disliking {video_id}: {e:#}");
-                            Resp::LikedMany { video_ids: Vec::new(), failed: vec![video_id], like: false, others: Vec::new() }
-                        }
+                Req::Dislike { video_id, skip_generation } => {
+                    let result = ytm::dislike(api, &video_id).await;
+                    if let Err(e) = &result {
+                        log::warn!("disliking {video_id}: {e:#}");
                     }
+                    Resp::Disliked { video_id, skip_generation, ok: result.is_ok() }
+                }
+                Req::RemoveRating { video_id, was_disliked } => {
+                    let result = ytm::set_like(api, &video_id, false).await;
+                    if let Err(e) = &result {
+                        log::warn!("removing rating of {video_id}: {e:#}");
+                    }
+                    Resp::RatingRemoved { video_id, was_disliked, ok: result.is_ok() }
                 }
                 Req::CreatePlaylist { title, video_ids } => {
                     let id = match video_ids.as_slice() {
@@ -1345,6 +1356,13 @@ impl Backend {
                     Err(e) => {
                         log::warn!("deleting playlist {id}: {e:#}");
                         Resp::DeleteFailed { error: format!("Couldn't delete the playlist: {e}") }
+                    }
+                },
+                Req::DeleteUpload { entity, title } => match ytm::delete_upload(api, &entity).await {
+                    Ok(()) => Resp::UploadDeleted(ytm::uploads(api).await?),
+                    Err(e) => {
+                        log::warn!("deleting upload {entity}: {e:#}");
+                        Resp::DeleteFailed { error: format!("Couldn't delete \u{201c}{title}\u{201d}: {e}") }
                     }
                 },
                 Req::Collaboration(id) => Resp::Collaboration(ytm::collaboration(api, &id).await?),

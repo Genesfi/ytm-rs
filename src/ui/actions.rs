@@ -9,9 +9,65 @@ use crate::model::{Target, Track};
 use super::lists::{self, LIKED_MUSIC};
 use super::queue::QueueFill;
 use super::undo::Undo;
-use super::{Action, App, Dialog, LibTab, NpTab, Page, jam, palette, transfer};
+use super::{Action, App, Dialog, LibTab, NpTab, Page, Unlike, jam, palette, transfer};
 
 impl App {
+    pub(super) fn heard_like_action(&self, like: bool) -> Option<Action> {
+        Some(Action::LikeHeard { like, video_id: self.playing_id()?.to_owned(), generation: self.generation })
+    }
+
+    fn request_unlike(&mut self, unlike: Unlike) {
+        if !self.logged_in {
+            self.toast("Sign in to like songs");
+            return;
+        }
+        match unlike {
+            Unlike::Track(track) => {
+                if let Some(id) = track.stands_for.clone() {
+                    let video = Track { id, video: true, stands_for: None, ..track.clone() };
+                    self.unlike_versions(track, video);
+                    return;
+                }
+                let send = Req::Like { video_id: track.id.clone(), like: false };
+                self.unlike_soon(vec![track], send);
+            }
+            Unlike::Versions(song, video) => self.unlike_versions(song, video),
+            Unlike::Selection(tracks) => self.set_many_likes(tracks, false),
+            Unlike::Rating(track) => {
+                let send = Req::RemoveRating { video_id: track.id.clone(), was_disliked: false };
+                self.unlike_soon(vec![track], send);
+            }
+        }
+    }
+
+    fn unlike_versions(&mut self, song: Track, video: Track) {
+        let send = Req::UnlikeBoth { song: song.id.clone(), video: video.id.clone() };
+        self.unlike_soon(vec![song, video], send);
+    }
+
+    fn set_many_likes(&mut self, tracks: Vec<Track>, like: bool) {
+        if !self.logged_in {
+            self.toast("Sign in to like songs");
+            return;
+        }
+        // Liking songs whose unlike waits: those stay liked, so it doesn't go.
+        if like && tracks.iter().any(|t| self.unliking_soon(&t.id)) {
+            self.undo();
+        }
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.liked.contains(&t.id) != like).collect();
+        if tracks.is_empty() { return; }
+        let stand_ins = tracks.iter().filter(|_| !like).filter_map(|t| Some((t.id.clone(), t.stands_for.clone()?))).collect();
+        let send = Req::LikeMany { video_ids: tracks.iter().map(|t| t.id.clone()).collect(), like, stand_ins };
+        if !like {
+            return self.unlike_soon(tracks, send);
+        }
+        self.set_liked(&tracks, true);
+        if tracks.len() > 10 {
+            self.toast(format!("Liking {} songs…", tracks.len()));
+        }
+        self.backend.request(send);
+    }
+
     pub(super) fn apply(&mut self, a: Action) {
         // In someone else's jam, playback changes become requests to the host.
         let a = if self.jam.guest() {
@@ -55,10 +111,10 @@ impl App {
             }
             Action::Open(Target::Song(t)) | Action::Radio(t) if self.explicit_hidden(&t) => {}
             // Radio from the song playing: it goes on playing, and the radio replaces what
-            // was to come, as YouTube Music's Start radio does.
-            Action::Radio(t) if self.current_id() == Some(t.id.as_str()) || self.playing_id() == Some(t.id.as_str()) => {
-                let Some(cur) = self.queue.current().cloned() else { return };
-                self.queue.replace(vec![cur.clone()], 0, None);
+            // was to come, as YouTube Music's Start radio does. Clicking its card (which
+            // starts a song's radio) does the same rather than starting it over.
+            Action::Open(Target::Song(t)) | Action::Radio(t) if self.current_id() == Some(t.id.as_str()) || self.playing_id() == Some(t.id.as_str()) => {
+                let Some(cur) = self.queue.keep_current() else { return };
                 self.queue_source = None;
                 if !self.radio_pending {
                     self.radio_pending = true;
@@ -150,36 +206,26 @@ impl App {
                 self.seek_to(Duration::from_secs_f32(secs.max(0.0)));
                 self.lyric_view.resume();
             }
-            Action::Like(t, like) => {
+            Action::Like(t, false) => self.request_unlike(Unlike::Track(t)),
+            Action::Like(t, true) => {
                 if !self.logged_in {
                     self.toast("Sign in to like songs");
                     return;
                 }
                 // Liked again while its unlike waits: that unlike just doesn't go.
-                if like && self.unliking_soon(&t.id) {
+                if self.unliking_soon(&t.id) {
                     return self.undo();
                 }
-                self.rating(|id| id == t.id);
-                // A song standing in for a liked video: the like to take away is the video's.
-                if !like && let Some(video) = t.stands_for.clone() {
-                    let send = Req::UnlikeBoth { song: t.id.clone(), video: video.clone() };
-                    let video = Track { id: video, video: true, stands_for: None, ..t.clone() };
-                    if self.liked.contains(&t.id) || self.liked.contains(&video.id) {
-                        return self.unlike_soon(vec![t, video], send);
-                    }
-                    self.set_liked(&[t, video], false);
-                    return self.backend.request(send);
-                }
-                if !like && self.liked.contains(&t.id) {
-                    return self.unlike_soon(vec![t.clone()], Req::Like { video_id: t.id, like });
-                }
                 // Optimistic: update the like state and the cached Liked songs list now.
-                self.set_liked(std::slice::from_ref(&t), like);
-                self.backend.request(Req::Like { video_id: t.id, like });
+                self.set_liked(std::slice::from_ref(&t), true);
+                self.backend.request(Req::Like { video_id: t.id, like: true });
             }
             // The heart of what's playing stands for both a music video and the song version
             // standing in for it: taking it away takes both likes, whichever are there.
-            Action::LikeHeard(like) => {
+            Action::LikeHeard { like, video_id, generation } => {
+                if generation != self.generation || self.playing_id() != Some(video_id.as_str()) {
+                    return;
+                }
                 let Some(heard) = self.playing_track().cloned() else { return };
                 let video = self.playing_as().and(self.current()).cloned();
                 // Liked again while its unlike waits: both come back as they were.
@@ -187,52 +233,26 @@ impl App {
                     return self.undo();
                 }
                 match video.filter(|_| !like) {
-                    Some(video) if self.logged_in => {
-                        let send = Req::UnlikeBoth { song: heard.id.clone(), video: video.id.clone() };
-                        if self.liked.contains(&heard.id) || self.liked.contains(&video.id) {
-                            self.unlike_soon(vec![heard, video], send);
-                        } else {
-                            // Neither shows as liked here, so there's nothing to take back.
-                            self.set_liked(&[heard, video], false);
-                            self.backend.request(send);
-                        }
-                    }
+                    Some(video) => self.request_unlike(Unlike::Versions(heard, video)),
                     _ => self.apply(Action::Like(heard, like)),
                 }
             }
-            Action::LikeMany(tracks, like) => {
-                if !self.logged_in {
-                    self.toast("Sign in to like songs");
-                    return;
-                }
-                // Liking songs whose unlike waits: those stay liked, so it doesn't go.
-                if like && tracks.iter().any(|t| self.unliking_soon(&t.id)) {
-                    self.undo();
-                } else if like {
-                    self.rating(|id| tracks.iter().any(|t| t.id == id));
-                }
-                let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.liked.contains(&t.id) != like).collect();
-                if tracks.is_empty() { return; }
-                if like {
-                    self.set_liked(&tracks, true);
-                } else {
-                    // Unlikes go a few a second (YouTube Music drops faster ones): each song
-                    // leaves the list when its unlike goes through, not all at once.
-                    self.unliking.extend(tracks.iter().map(|t| (t.id.clone(), t.clone())));
-                }
-                if tracks.len() > 10 {
-                    // One at a time, then checked: a few hundred take a few minutes.
-                    self.toast(format!("{} {} songs…", if like { "Liking" } else { "Removing likes from" }, tracks.len()));
-                }
-                let stand_ins = tracks.iter().filter(|_| !like).filter_map(|t| Some((t.id.clone(), t.stands_for.clone()?))).collect();
-                self.backend.request(Req::LikeMany { video_ids: tracks.into_iter().map(|t| t.id).collect(), like, stand_ins });
-            }
+            Action::LikeMany(tracks, false) => self.request_unlike(Unlike::Selection(tracks)),
+            Action::LikeMany(tracks, true) => self.set_many_likes(tracks, true),
             Action::Dislike(t) => {
                 if !self.logged_in { self.toast("Sign in to rate songs"); return; }
+                let id = Some(t.id.as_str());
+                let skip_generation = (!self.jam.guest() && (self.current_id() == id || self.playing_id() == id)).then_some(self.generation);
                 self.rating(|id| id == t.id);
                 self.set_liked(std::slice::from_ref(&t), false);
-                self.backend.request(Req::Dislike(t.id));
+                self.backend.request(Req::Dislike { video_id: t.id, skip_generation });
             }
+            Action::RemoveDislike(video_id) => {
+                if !self.logged_in { self.toast("Sign in to rate songs"); return; }
+                self.rating(|id| id == video_id);
+                self.backend.request(Req::RemoveRating { video_id, was_disliked: true });
+            }
+            Action::RemoveLike(track) => self.request_unlike(Unlike::Rating(track)),
             Action::Share(target) => {
                 self.share_pending = Some(share_url(&target));
                 self.toast("Link copied");
@@ -317,6 +337,11 @@ impl App {
                 if let Some(id) = self.current_collection().filter(|c| !c.is_album && c.owned).map(|c| c.id.clone()) {
                     self.backend.request(Req::Collaboration(id.clone()));
                     self.dialog = Some(Dialog::Collaborate { id, info: None, busy: true, confirm_off: false });
+                }
+            }
+            Action::DeleteUpload(t) => {
+                if let Some(entity) = crate::ytm::upload_entity(&t.id) {
+                    self.dialog = Some(Dialog::ConfirmDeleteUpload { entity, title: t.title });
                 }
             }
             Action::DeletePlaylist => {
@@ -523,6 +548,10 @@ impl App {
             self.mini.request(true);
             return;
         }
+        if on && !self.pending_unlikes().is_empty() {
+            self.toast = None;
+            self.settle();
+        }
         // With a video on show, the mini player is that video (picture in picture).
         let video = on && self.np_open && self.shown_video().is_some();
         self.mini.toggle(ctx, now, video);
@@ -547,6 +576,12 @@ impl App {
         }
         ctx.request_repaint();
     }
+}
+
+/// Whether a link to it opens for others: an uploaded album's or artist's page opens
+/// only for the account that uploaded it.
+pub(super) fn shareable(target: &Target) -> bool {
+    !matches!(target, Target::Album(id) | Target::Artist(id) if crate::ytm::uploaded(id))
 }
 
 fn share_url(target: &Target) -> String {
@@ -654,5 +689,13 @@ mod share_tests {
         assert_eq!(share_url(&Target::Playlist("MPSPPL123".into())), "https://music.youtube.com/playlist?list=PL123");
         assert_eq!(share_url(&Target::Album("MPRE123".into())), "https://music.youtube.com/browse/MPRE123");
         assert_eq!(share_url(&Target::Artist("UC123".into())), "https://music.youtube.com/channel/UC123");
+    }
+
+    #[test]
+    fn uploaded_albums_and_artists_have_no_link_to_share() {
+        assert!(!shareable(&Target::Artist("FEmusic_library_privately_owned_artist_detaila_po_CICr2crg7OWpchIIY29sZHBsYXk".into())));
+        assert!(!shareable(&Target::Album("FEmusic_library_privately_owned_release_detailb_po_CICr2crg7OWpchIOZ2hvc3Qgc3Rvcmllcw".into())));
+        assert!(shareable(&Target::Artist("UC123".into())));
+        assert!(shareable(&Target::Album("MPRE123".into())));
     }
 }

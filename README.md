@@ -233,7 +233,7 @@ The relay in `server/` is a separate Cloudflare Worker, also in Rust ([workers-r
 
 ## Contributing
 
-Found a bug or have an idea? [Open an issue](https://github.com/grapedjuice/ytm-rs/issues). Questions, or a setup to show off? Head to [Discussions](https://github.com/grapedjuice/ytm-rs/discussions). Pull requests are welcome.
+Found a bug or have an idea? [Open an issue](https://github.com/grapedjuice/ytm-rs/issues). Questions, or a setup to show off? Head to [Discussions](https://github.com/grapedjuice/ytm-rs/discussions). Pull requests are welcome, and so are translations: see [Translating ytm-rs](TRANSLATING.md).
 
 ## License
 
@@ -256,4 +256,12 @@ ytm-rs is licensed under [GPL-3.0](LICENSE).
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=grapedjuice/ytm-rs&type=date&legend=bottom-right" />
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=grapedjuice/ytm-rs&type=date&legend=bottom-right" />
  </picture>
+</a>
+
+## Contributors
+
+Thanks to everyone who has sent code, features and fixes to ytm-rs.
+
+<a href="https://github.com/grapedjuice/ytm-rs/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=grapedjuice/ytm-rs" alt="Contributors" />
 </a>

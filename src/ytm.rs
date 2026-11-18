@@ -1374,7 +1374,7 @@ fn upload_rows(shelf: &Value) -> Vec<Track> {
 /// An uploaded song's row. Some may name the song only in their menu (Play next, Add to
 /// queue), which is where ytmusicapi reads it from.
 fn upload_row(r: &Value) -> Option<Track> {
-    list_item(r).or_else(|| {
+    let t = list_item(r).or_else(|| {
         let id = arr(&r["menu"]["menuRenderer"]["items"]).iter().find_map(|i| {
             let queued = &i["menuServiceItemRenderer"]["serviceEndpoint"]["queueAddEndpoint"]["queueTarget"]["videoId"];
             queued.as_str().or_else(|| i["menuNavigationItemRenderer"]["navigationEndpoint"]["watchEndpoint"]["videoId"].as_str())
@@ -1382,7 +1382,25 @@ fn upload_row(r: &Value) -> Option<Track> {
         let mut r = r.clone();
         r["playlistItemData"] = json!({ "videoId": id });
         list_item(&r)
-    })
+    })?;
+    // The menu's Delete asks first, then deletes it by this.
+    let entity = arr(&r["menu"]["menuRenderer"]["items"]).iter().find_map(|i| {
+        let confirm = &i["menuNavigationItemRenderer"]["navigationEndpoint"]["confirmDialogEndpoint"]["content"]["confirmDialogRenderer"];
+        confirm["confirmButton"]["buttonRenderer"]["command"]["musicDeletePrivatelyOwnedEntityCommand"]["entityId"].as_str()
+    });
+    if let Some(e) = entity {
+        UPLOAD_ENTITIES.lock().unwrap().insert(t.id.clone(), e.to_owned());
+    }
+    Some(t)
+}
+
+/// What deletes each uploaded song from the account (video ID → its entity), as the
+/// uploads last listed them.
+static UPLOAD_ENTITIES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+
+/// What deletes `video_id` from the account's uploads, if it's one of them.
+pub fn upload_entity(video_id: &str) -> Option<String> {
+    UPLOAD_ENTITIES.lock().unwrap().get(video_id).cloned()
 }
 
 fn is_year(s: &str) -> bool {
@@ -1459,6 +1477,59 @@ fn parse_upload_artist(v: &Value, id: &str) -> Option<(ArtistPage, Option<String
 }
 
 // -------------------------------------------------------------------------- edits
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SongRating {
+    Like,
+    Dislike,
+    Indifferent,
+}
+
+impl SongRating {
+    fn from_status(status: &Value) -> Option<Self> {
+        match status.as_str()? {
+            "DISLIKE" => Some(Self::Dislike),
+            "LIKE" => Some(Self::Like),
+            "INDIFFERENT" => Some(Self::Indifferent),
+            _ => None,
+        }
+    }
+}
+
+/// The signed-in account's current rating of the requested upload, if supplied.
+pub async fn song_rating(api: &Api, video_id: &str) -> anyhow::Result<Option<SongRating>> {
+    let body = json!({"videoId": video_id, "isAudioOnly": true});
+    let v = api.call_signed_in("next", body).await?;
+    Ok(parse_song_rating(&v, video_id))
+}
+
+fn parse_song_rating(v: &Value, video_id: &str) -> Option<SongRating> {
+    let overlay = &v["playerOverlays"]["playerOverlayRenderer"];
+    // The segmented player buttons use the current upload's rating entity.
+    if v["currentVideoEndpoint"]["watchEndpoint"]["videoId"].as_str() == Some(video_id)
+        && let Some(rating) = arr(&overlay["videoActionBar"]["videoActionBarViewModel"]["buttons"]).iter().find_map(|button| {
+            let button = button.get("buttonViewModel").unwrap_or(button);
+            let like = &button["segmentedLikeDislikeButtonViewModel"]["likeButtonViewModel"];
+            let like = like.get("likeButtonViewModel").unwrap_or(like);
+            let entity = &like["likeStatusEntity"];
+            let updated = like["likeStatusEntityKey"].as_str().or_else(|| entity["key"].as_str()).and_then(|key| {
+                arr(&v["frameworkUpdates"]["entityBatchUpdate"]["mutations"]).iter().rev().find_map(|mutation| {
+                    let rating = &mutation["payload"]["likeStatusEntity"];
+                    (rating["key"].as_str() == Some(key)).then(|| SongRating::from_status(&rating["likeStatus"])).flatten()
+                })
+            });
+            updated.or_else(|| SongRating::from_status(&entity["likeStatus"]))
+        })
+    {
+        return Some(rating);
+    }
+
+    // Older player overlays carry the target and rating directly.
+    arr(&overlay["actions"]).iter().find_map(|a| {
+        let button = &a["likeButtonRenderer"];
+        (button["target"]["videoId"].as_str() == Some(video_id)).then(|| SongRating::from_status(&button["likeStatus"])).flatten()
+    })
+}
 
 /// Like or un-like a song for the signed-in account.
 pub async fn set_like(api: &Api, video_id: &str, like: bool) -> anyhow::Result<()> {
@@ -1626,6 +1697,12 @@ fn move_action(set_id: &str, before: Option<&str>) -> Value {
         action["movedSetVideoIdSuccessor"] = next.into();
     }
     action
+}
+
+/// Delete an uploaded song from the account (`Track::upload`).
+pub async fn delete_upload(api: &Api, entity: &str) -> anyhow::Result<()> {
+    write(api, "music/delete_privately_owned_entity", json!({"entityId": entity})).await?;
+    Ok(())
 }
 
 pub async fn delete_playlist(api: &Api, id: &str) -> anyhow::Result<()> {
@@ -2158,6 +2235,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn song_rating_comes_from_the_requested_player_button() {
+        let mut response = json!({
+            "playerOverlays": {"playerOverlayRenderer": {"actions": [
+                {"likeButtonRenderer": {"target": {"videoId": "another"}, "likeStatus": "DISLIKE"}},
+                {"likeButtonRenderer": {"target": {"videoId": "song"}, "likeStatus": "INDIFFERENT"}}
+            ]}},
+            "contents": {"likeEndpoint": {"target": {"videoId": "song"}, "status": "DISLIKE"}}
+        });
+        assert_eq!(parse_song_rating(&response, "song"), Some(SongRating::Indifferent));
+        assert_eq!(parse_song_rating(&response, "another"), Some(SongRating::Dislike));
+        assert_eq!(parse_song_rating(&response, "missing"), None);
+        let status = &mut response["playerOverlays"]["playerOverlayRenderer"]["actions"][1]["likeButtonRenderer"]["likeStatus"];
+        *status = json!("LIKE");
+        assert_eq!(parse_song_rating(&response, "song"), Some(SongRating::Like));
+    }
+
+    #[test]
+    fn song_rating_reads_the_signed_in_players_entity() {
+        let mut response = json!({
+            "currentVideoEndpoint": {"watchEndpoint": {"videoId": "song"}},
+            "playerOverlays": {"playerOverlayRenderer": {"videoActionBar": {"videoActionBarViewModel": {"buttons": [
+                {"buttonViewModel": {"segmentedLikeDislikeButtonViewModel": {
+                    "likeButtonViewModel": {"likeButtonViewModel": {
+                        "likeStatusEntityKey": "song-rating",
+                        "likeStatusEntity": {"key": "song-rating", "likeStatus": "DISLIKE"}
+                    }}
+                }}}
+            ]}}}},
+            "frameworkUpdates": {"entityBatchUpdate": {"mutations": [
+                {"payload": {"likeStatusEntity": {"key": "another-rating", "likeStatus": "LIKE"}}}
+            ]}}
+        });
+        assert_eq!(parse_song_rating(&response, "song"), Some(SongRating::Dislike));
+        assert_eq!(parse_song_rating(&response, "another"), None);
+        response["frameworkUpdates"]["entityBatchUpdate"]["mutations"].as_array_mut().unwrap().push(
+            json!({"payload": {"likeStatusEntity": {"key": "song-rating", "likeStatus": "INDIFFERENT"}}}),
+        );
+        assert_eq!(parse_song_rating(&response, "song"), Some(SongRating::Indifferent));
+    }
+
+    #[test]
     fn play_report_asks_with_the_signature_timestamp() {
         let body = report_play_body("gIhejm0k3dU", Some(20767));
         assert_eq!(body["videoId"], "gIhejm0k3dU");
@@ -2424,6 +2542,24 @@ mod tests {
         // Those pages open in the app; Library › Uploads' own tabs aren't one of them.
         assert!(uploaded(ARTIST) && uploaded(ALBUM));
         assert!(!uploaded("FEmusic_library_privately_owned_tracks") && !uploaded("MPREb_54uxDZG0XOp"));
+    }
+
+    #[test]
+    fn an_uploaded_song_knows_what_deletes_it() {
+        // Its menu's Delete, as the uploads page has it (checked against a live answer).
+        let mut row: Value = serde_json::from_str(UPLOAD_ROW).unwrap();
+        row["musicResponsiveListItemRenderer"]["menu"] = json!({"menuRenderer": {"items": [
+            {"menuNavigationItemRenderer": {"text": {"runs": [{"text": "Go to artist"}]}}},
+            {"menuNavigationItemRenderer": {"icon": {"iconType": "DELETE"}, "navigationEndpoint": {"confirmDialogEndpoint": {"content": {"confirmDialogRenderer": {
+                "confirmButton": {"buttonRenderer": {"command": {"musicDeletePrivatelyOwnedEntityCommand": {"entityId": "t_po_CL-T5LKR7Zrq4QEQ2fetwwY"}}}}
+            }}}}}},
+        ]}});
+        row["musicResponsiveListItemRenderer"]["flexColumns"][0]["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"][0]["navigationEndpoint"]["watchEndpoint"]["videoId"] = json!("delete_test");
+        let t = upload_row(&row["musicResponsiveListItemRenderer"]).unwrap();
+        assert_eq!(t.id, "delete_test");
+        assert_eq!(upload_entity("delete_test").as_deref(), Some("t_po_CL-T5LKR7Zrq4QEQ2fetwwY"));
+        // Without one, nothing to delete it by.
+        assert_eq!(upload_entity("not_uploaded"), None);
     }
 
     // An uploaded album's page as ytmusicapi reads one (not checked against a live answer):

@@ -35,9 +35,10 @@ impl App {
             video_id: t.id.clone(),
             title: t.title.clone(),
             artist: t.artist_line(),
-            artist_id: t.first_artist_id().map(str::to_owned),
+            // Not an uploaded song's artist or album: only its uploader can open those.
+            artist_id: t.first_artist_id().filter(|id| !crate::ytm::uploaded(id)).map(str::to_owned),
             album: t.album.as_ref().map(|a| a.name.clone()),
-            album_id: t.album.as_ref().and_then(|a| a.id.clone()),
+            album_id: t.album.as_ref().and_then(|a| a.id.clone()).filter(|id| !crate::ytm::uploaded(id)),
             art: backend::art_url(t),
             artist_pic: t.first_artist_id().and_then(|id| self.artist_pics.get(id).cloned().flatten()),
             app_icon: self.app_icon,
@@ -148,7 +149,7 @@ impl App {
                     // A new name per song: Windows keeps showing an older picture by its path.
                     let _ = std::fs::remove_dir_all(&dir);
                     std::fs::create_dir_all(&dir)?;
-                    let path = dir.join(format!("{id}.jpg"));
+                    let path = dir.join(format!("{}.jpg", file_safe(&id)));
                     std::fs::write(&path, &bytes)?;
                     anyhow::Ok(path)
                 }
@@ -600,7 +601,7 @@ impl App {
                 // A new name per song, so Windows doesn't show a cached older cover.
                 let _ = std::fs::remove_dir_all(&dir);
                 std::fs::create_dir_all(&dir)?;
-                let path = dir.join(format!("{video_id}.jpg"));
+                let path = dir.join(format!("{}.jpg", file_safe(&video_id)));
                 std::fs::write(&path, &bytes)?;
                 anyhow::Ok(path)
             }
@@ -644,6 +645,12 @@ fn back_from_tray(focused: bool, left_focus: &mut bool) -> bool {
         return false;
     }
     std::mem::take(left_focus)
+}
+
+/// A song's ID as a file name: only letters, digits, `-` and `_`, so one that isn't a
+/// YouTube ID can't point outside the folder.
+fn file_safe(id: &str) -> String {
+    id.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect()
 }
 
 #[cfg(test)]

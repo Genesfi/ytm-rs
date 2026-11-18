@@ -20,7 +20,7 @@ pub(super) struct Palette {
     /// Just opened: the list starts from its top.
     fresh: bool,
     /// Up, Down, Enter and Esc this frame, taken before anything else sees them.
-    keys: (bool, bool, bool, bool),
+    keys: (bool, bool, bool, bool, bool),
     /// The commands run lately, most recent first: for this run of the app only.
     recent: Vec<Command>,
 }
@@ -91,33 +91,34 @@ struct Entry {
 
 /// Settings' categories and sections, by their titles. One named as its category opens
 /// that; any other is looked for with Settings' own search.
-const SECTIONS: [(&str, SettingsTab); 22] = {
+/// As Settings titles them, in this run's language: a search for one finds it there.
+fn sections() -> [(&'static str, SettingsTab); 22] {
     use SettingsTab::*;
     [
-        ("Account", Account),
-        ("Connections", Account),
-        ("Playback", Playback),
-        ("Sound", Playback),
-        ("Music videos", Playback),
-        ("Equalizer", Playback),
-        ("Playback speed", Playback),
-        ("Lyrics", Lyrics),
-        ("Lyrics timing", Lyrics),
-        ("Lyrics sources", Lyrics),
-        ("Appearance", Appearance),
-        ("Mini player", Appearance),
-        ("App icon", Appearance),
-        ("General", General),
-        ("Window", General),
-        ("Downloads", General),
-        ("Network", General),
+        (tr!("settings-account"), Account),
+        (tr!("settings-connections"), Connections),
+        (tr!("settings-playback"), Playback),
+        (tr!("settings-sound"), Playback),
+        (tr!("settings-music-videos"), Playback),
+        (tr!("settings-equalizer"), Playback),
+        (tr!("settings-playback-speed"), Playback),
+        (tr!("settings-lyrics"), Lyrics),
+        (tr!("settings-lyrics-timing"), Lyrics),
+        (tr!("settings-lyrics-sources"), Lyrics),
+        (tr!("settings-appearance"), Appearance),
+        (tr!("settings-mini-player"), Appearance),
+        (tr!("settings-app-icon"), Appearance),
+        (tr!("settings-general"), General),
+        (tr!("settings-window"), General),
+        (tr!("settings-downloads"), General),
+        (tr!("settings-network"), General),
         ("Import", General),
-        ("Keyboard shortcuts", Shortcuts),
+        (tr!("settings-keyboard-shortcuts"), Shortcuts),
         ("System-wide shortcuts", Shortcuts),
-        ("Updates", About),
-        ("About", About),
+        (tr!("settings-updates"), About),
+        (tr!("settings-about"), About),
     ]
-};
+}
 
 /// Ctrl+K opens and closes it. Taken before any text box sees it: there, it would delete
 /// to the end of the line (Cmd+K on macOS leaves Ctrl+K to do that). Its own keys are
@@ -139,8 +140,11 @@ pub(super) fn shortcut(app: &mut App, ctx: &egui::Context) {
     }
     p.keys = if p.open {
         ctx.input_mut(|i| {
+            let enter_started = i.events.iter().any(|event| {
+                matches!(event, egui::Event::Key { key: Key::Enter, pressed: true, repeat: false, modifiers: Modifiers::NONE, .. })
+            });
             let mut key = |k| i.consume_key(Modifiers::NONE, k);
-            (key(Key::ArrowUp), key(Key::ArrowDown), key(Key::Enter), key(Key::Escape))
+            (key(Key::ArrowUp), key(Key::ArrowDown), key(Key::Enter), key(Key::Escape), enter_started)
         })
     } else {
         Default::default()
@@ -171,7 +175,7 @@ fn entries(app: &App) -> Vec<Entry> {
     if song {
         add(Group::Pages, Command::NowPlaying, "Now playing", "", icon::MUSIC);
     }
-    for (name, tab) in SECTIONS {
+    for (name, tab) in sections() {
         add(Group::Settings, Command::Setting(tab, name), name, if name == tab.label() { "" } else { tab.label() }, icon::SETTINGS);
     }
     let cards = app.library.as_ref().map(|l| l.playlists.as_slice()).or(app.sidebar_cache.as_deref()).unwrap_or_default();
@@ -286,8 +290,10 @@ pub(super) fn show(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let all = entries(app);
+    let protect_unlike = app.heard_liked() && app.rating_settings.confirm_unlike;
+    let unlike_target = egui::Id::unique((app.playing_id(), app.generation));
     let p = &mut app.palette;
-    let (up, down, enter, esc) = std::mem::take(&mut p.keys);
+    let (up, down, enter, esc, enter_started) = std::mem::take(&mut p.keys);
     let screen = ctx.content_rect();
     widgets::modal_extras(ctx, id());
     let area = egui::Modal::default_area(id()).anchor(Align2::CENTER_TOP, vec2(0.0, (screen.height() * 0.12).max(24.0)));
@@ -347,7 +353,12 @@ pub(super) fn show(app: &mut App, ctx: &egui::Context) {
                         group = Some(e.group);
                         heading(ui, e.group.label());
                     }
-                    let resp = row(ui, e, i == p.selected);
+                    let unlike = protect_unlike && e.cmd == Command::Act(Act::Like);
+                    if unlike && run == Some(i) {
+                        run = None;
+                    }
+                    let selected = i == p.selected;
+                    let (resp, activate) = row(ui, e, selected, unlike.then_some(unlike_target), selected.then_some(enter_started));
                     if i == p.selected {
                         chosen = Some(resp.id);
                         if up || down {
@@ -359,7 +370,7 @@ pub(super) fn show(app: &mut App, ctx: &egui::Context) {
                     if resp.hovered() && moved {
                         p.selected = i;
                     }
-                    if resp.clicked() {
+                    if activate {
                         run = Some(i);
                     }
                 }
@@ -395,21 +406,28 @@ fn heading(ui: &mut Ui, label: &str) {
     ui.painter().text(pos2(rect.left() + 10.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, label.to_uppercase(), theme::semibold(11.0), theme::text_faint());
 }
 
-fn row(ui: &mut Ui, e: &Entry, selected: bool) -> egui::Response {
+fn row(ui: &mut Ui, e: &Entry, selected: bool, unlike: Option<egui::Id>, enter_pressed: Option<bool>) -> (egui::Response, bool) {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
     let name = [e.label.as_str(), e.detail, e.group.label()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &name));
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     if !ui.is_rect_visible(rect) {
-        return resp;
+        return (resp, false);
     }
-    let s =theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.1);
+    let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.1);
     if s > 0.0 {
         ui.painter().rect_filled(rect, 8.0, theme::glass(0.10 * s));
     }
     let mid = rect.center().y;
     let at = pos2(rect.left() + 20.0, mid);
-    if e.cover.is_empty() {
+    let gesture = unlike.map(|target| super::ratings::like_gesture(ui, &resp, target, true, enter_pressed));
+    if let Some(gesture) = &gesture {
+        let color = theme::lerp_color(theme::text_dim(), theme::text(), s);
+        super::ratings::unlike_heart(ui, at, 16.0, 1.0, color, color, gesture.progress);
+        if gesture.hint {
+            super::ratings::unlike_hint(ui, &resp);
+        }
+    } else if e.cover.is_empty() {
         widgets::icon_at(ui, at, e.glyph, 16.0, theme::lerp_color(theme::text_dim(), theme::text(), s));
     } else {
         // The sidebar's corners, scaled to this smaller cover.
@@ -423,7 +441,8 @@ fn row(ui: &mut Ui, e: &Entry, selected: bool) -> egui::Response {
     let x = rect.left() + 42.0;
     let g = widgets::galley(ui, &e.label, theme::regular(14.0), theme::text(), rect.right() - 12.0 - detail_w - x);
     ui.painter().galley(pos2(x, mid - g.size().y / 2.0), g, theme::text());
-    resp
+    let activated = gesture.map_or_else(|| resp.clicked(), |gesture| gesture.activate);
+    (resp, activated)
 }
 
 /// Does what it says, the way its button or key does.
@@ -453,7 +472,11 @@ fn run_command(app: &mut App, ctx: &egui::Context, cmd: Command) {
             Act::Prev => app.prev(),
             Act::Shuffle => app.toggle_shuffle(),
             Act::Repeat => app.queue.repeat = app.queue.repeat.next(),
-            Act::Like => app.actions.push(Action::LikeHeard(!app.heard_liked())),
+            Act::Like => {
+                if let Some(action) = app.heard_like_action(!app.heard_liked()) {
+                    app.actions.push(action);
+                }
+            }
             Act::Lyrics => app.toggle_lyrics(),
             Act::Queue => app.toggle_queue(),
             Act::Mini => app.actions.push(Action::Mini(!app.mini.target())),
@@ -488,8 +511,21 @@ mod tests {
     fn sections_are_in_settings() {
         // A renamed section would else turn into a plain search for its old name.
         let code = [include_str!("pages.rs"), include_str!("hotkeys.rs"), include_str!("transfer.rs")].concat();
-        for (name, tab) in SECTIONS.into_iter().filter(|(name, tab)| *name != tab.label()) {
-            assert!(code.contains(&format!("(ui, \"{name}\"")), "no section titled {name:?} in {:?}", tab.label());
+        // A section's title, written out or by its message's id.
+        let titled = |name: &str| {
+            code.contains(&format!("(ui, \"{name}\""))
+                || code.match_indices("(ui, tr!(\"").any(|(i, _)| {
+                    let rest = &code[i + 10..];
+                    let id = &rest[..rest.find('"').unwrap_or(0)];
+                    crate::i18n::text(Box::leak(id.to_owned().into_boxed_str())) == name
+                })
+        };
+        // Every tab is listed as itself, so running it opens the tab.
+        for tab in SettingsTab::ALL {
+            assert!(sections().iter().any(|&(name, t)| t == tab && name == tab.label()), "{:?} isn't listed as its own tab", tab.label());
+        }
+        for (name, tab) in sections().into_iter().filter(|(name, tab)| *name != tab.label()) {
+            assert!(titled(name), "no section titled {name:?} in {:?}", tab.label());
         }
     }
 
