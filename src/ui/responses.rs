@@ -522,7 +522,13 @@ impl App {
                 }
             }
             Resp::MusicVideo { song, video } => {
-                self.music_videos.insert(song, video);
+                let has_video = video.is_some();
+                self.music_videos.insert(song.clone(), video);
+                // If the user has Video mode enabled and this is the currently playing song,
+                // smoothly crossfade into its music video automatically once found.
+                if has_video && self.show_video && !self.jam.active() && self.current_id() == Some(song.as_str()) && self.playing_as().is_none() {
+                    self.play_music_video();
+                }
             }
             Resp::PlayError { generation, msg } => self.on_play_error(generation, msg),
             Resp::ServerQueue(q) => self.adopt_server_queue(q),

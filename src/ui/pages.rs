@@ -2199,10 +2199,12 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
             let has_system = theme::system_accent().is_some();
             let desc = if app.accent_source == AccentSource::File {
                 "Follows the colours in theme.conf: the accent, the text and, if you like, the background. Save the file and the app follows in a couple of seconds. wallust or pywal can write it too.".to_owned()
+            } else if app.accent_source == AccentSource::Album {
+                "Dynamically extracts a vivid colour from the playing album cover (same algorithm as FocusGrow) and glides smoothly between tracks.".to_owned()
             } else if has_system {
-                "The theme's colour, your Windows accent colour, a colour file, or one you pick.".to_owned()
+                "The theme's colour, dynamic album art colour, your Windows accent colour, a colour file, or one you pick.".to_owned()
             } else {
-                "The theme's colour, a colour file, or one you pick.".to_owned()
+                "The theme's colour, dynamic album art colour, a colour file, or one you pick.".to_owned()
             };
             setting_row(ui, "Accent colour", Some(&desc), |ui| {
                 let btn = dropdown_button(ui, app.accent_source.label(), 120.0, "Accent colour");
@@ -2212,7 +2214,7 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
                     let current = app.accent_source;
                     // Custom starts from the colour showing now (before light pages deepen
                     // it, or it would be deepened twice).
-                    let options = [AccentSource::Theme, AccentSource::System, AccentSource::File, AccentSource::Custom(app.base_accent())];
+                    let options = [AccentSource::Theme, AccentSource::Album, AccentSource::System, AccentSource::File, AccentSource::Custom(app.base_accent())];
                     for o in options.into_iter().filter(|o| has_system || *o != AccentSource::System) {
                         let selected = std::mem::discriminant(&o) == std::mem::discriminant(&current);
                         if option_row(ui, o.label(), selected).clicked() {
@@ -2231,6 +2233,12 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
                     }
                     app.accent_source = p;
                 }
+                if app.accent_source == AccentSource::Album {
+                    ui.add_space(8.0);
+                    let (swatch, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                    ui.painter().circle_filled(swatch.center(), 10.0, app.base_accent());
+                    ui.painter().circle_stroke(swatch.center(), 10.0, egui::Stroke::new(1.0, theme::glass(0.25)));
+                }
                 if app.accent_source == AccentSource::File {
                     ui.add_space(8.0);
                     edit |= pill(ui, "Edit file", None, false).clicked();
@@ -2247,6 +2255,12 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
                     super::colorpick::button(ui, c, "Custom accent colour");
                 }
             });
+            if app.accent_source == AccentSource::Album {
+                divider(ui);
+                setting_row(ui, "Complementary album hue", Some("Shift the extracted album colour 180° for higher contrast against the artwork."), |ui| {
+                    toggle(ui, &mut app.album_accent_comp, "Complementary album hue");
+                });
+            }
         }
         divider(ui);
         setting_row(ui, "Accent-coloured controls", Some("The play button and volume slider in the accent colour, like the progress line."), |ui| {

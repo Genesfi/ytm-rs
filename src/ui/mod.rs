@@ -147,6 +147,8 @@ fn start_page(choice: &Page, logged_in: bool, podcasts: bool) -> Page {
 pub enum AccentSource {
     /// The theme's own: a fixed colour, the cover's, or the system's.
     Theme,
+    /// Dynamic colour extracted from the playing song's album art (FocusGrow's algorithm).
+    Album,
     /// The system accent colour, whatever the theme.
     System,
     /// `theme.conf` (every colour) or `accent.txt` (just this one) in the data folder, for
@@ -156,10 +158,11 @@ pub enum AccentSource {
 }
 
 impl AccentSource {
-    /// Saved as "" (theme), "system", "file" or "#rrggbb"; older versions read "system"
-    /// and "file" as the theme's.
+    /// Saved as "" (theme), "album", "system", "file" or "#rrggbb"; older versions read
+    /// unknown keys as the theme's.
     fn from_key(v: &str) -> Self {
         match v {
+            "album" => Self::Album,
             "system" => Self::System,
             "file" => Self::File,
             v => crate::preset::hex(v).map_or(Self::Theme, Self::Custom),
@@ -169,6 +172,7 @@ impl AccentSource {
     fn key(self) -> String {
         match self {
             Self::Theme => String::new(),
+            Self::Album => "album".into(),
             Self::System => "system".into(),
             Self::File => "file".into(),
             Self::Custom(c) => format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()),
@@ -178,6 +182,7 @@ impl AccentSource {
     pub fn label(self) -> &'static str {
         match self {
             Self::Theme => "Theme",
+            Self::Album => "Album art",
             Self::System => "System",
             Self::File => "From file",
             Self::Custom(_) => "Custom",
@@ -553,8 +558,15 @@ pub struct App {
     chrome_applied: Option<String>,
     /// Light or dark pages (the ytm-rs theme's; see `light_pages`).
     appearance: theme::Appearance,
-    /// The theme's accent colour, the system's or the listener's own.
+    /// The theme's accent colour, the album art's, the system's or the listener's own.
     accent_source: AccentSource,
+    /// Use the 180° complementary hue when `accent_source == AccentSource::Album`.
+    album_accent_comp: bool,
+    /// FocusGrow-extracted dynamic album accent (normal and complementary) + smoothed display colour.
+    album_accent: Color32,
+    album_accent_comp_color: Color32,
+    album_accent_shown: Color32,
+    album_accent_last_frame: f64,
     /// The play button and volume slider in the accent colour, like the progress line.
     accent_controls: bool,
     anim_bg: bool,
@@ -984,6 +996,11 @@ impl App {
             // Dev hook: YTM_APPEARANCE=light|dark|system tries a mode without saving it.
             appearance: theme::Appearance::from_key(&dev_var("YTM_APPEARANCE").map(str::to_owned).or_else(|| get("appearance")).unwrap_or_default()),
             accent_source: AccentSource::from_key(&get("custom_accent").unwrap_or_default()),
+            album_accent_comp: get("album_accent_comp").is_some_and(|v| v == "1"),
+            album_accent: theme::RED,
+            album_accent_comp_color: Color32::from_rgb(0x4e, 0xff, 0xe3),
+            album_accent_shown: theme::RED,
+            album_accent_last_frame: 0.0,
             accent_controls: get("accent_controls").is_some_and(|v| v == "1"),
             anim_bg: get("anim_bg").is_none_or(|v| v == "1"),
             glass_on: get("glass_on").is_none_or(|v| v == "1"),
@@ -1355,9 +1372,33 @@ impl App {
     fn base_accent(&self) -> Color32 {
         match self.accent_source {
             AccentSource::Custom(c) => c,
+            AccentSource::Album => self.album_accent_shown,
             AccentSource::System => theme::system_accent().unwrap_or_else(|| self.look().accent(self.accent)),
             AccentSource::File => (self.file_theme().accent).or_else(|| theme::file_accent(&self.accent_file())).unwrap_or_else(|| self.look().accent(self.accent)),
             AccentSource::Theme => self.look().accent(self.accent),
+        }
+    }
+
+    /// Smoothly crossfade `album_accent_shown` toward the active album art colour.
+    fn tick_album_accent(&mut self, ctx: &egui::Context, now: f64) {
+        let target = if self.album_accent_comp { self.album_accent_comp_color } else { self.album_accent };
+        let dt = if self.album_accent_last_frame > 0.0 {
+            (now - self.album_accent_last_frame).clamp(0.0, 0.1) as f32
+        } else {
+            1.0
+        };
+        self.album_accent_last_frame = now;
+        if self.album_accent_shown == target {
+            return;
+        }
+        let k = 1.0 - (-dt / 0.18).exp();
+        let next = theme::lerp_color(self.album_accent_shown, target, k);
+        let close = (next.r() as i16 - target.r() as i16).abs() <= 1
+            && (next.g() as i16 - target.g() as i16).abs() <= 1
+            && (next.b() as i16 - target.b() as i16).abs() <= 1;
+        self.album_accent_shown = if close { target } else { next };
+        if self.accent_source == AccentSource::Album && !close && !self.window_hidden {
+            pace::repaint_after(ctx, Duration::from_millis(16));
         }
     }
 
@@ -1416,6 +1457,8 @@ impl App {
     fn show_cover_colours(&mut self, now: f64) {
         let Some(art) = self.cover_colours().cloned() else { return };
         self.accent = art.accent;
+        self.album_accent = art.album_accent;
+        self.album_accent_comp_color = art.album_accent_comp;
         self.art_brightness = art.brightness;
         if let Some(bg) = &self.bg {
             bg.set_art(art);
@@ -1482,6 +1525,7 @@ impl eframe::App for App {
         let now = ctx.input(|i| i.time);
         self.sync_look();
         self.pump(ctx, now);
+        self.tick_album_accent(ctx, now);
         // A sorted playlist that loads again in a while, for its new order.
         if let Some(t) = self.sorting.values().filter_map(lists::SortWait::due).reduce(f64::min) {
             ctx.request_repaint_after(Duration::from_secs_f64((t - now).max(0.0)));
@@ -2071,6 +2115,7 @@ impl eframe::App for App {
         if dev_var("YTM_FONT").is_none() {
             storage.set_string("font", theme::font_choice());
         }
+        storage.set_string("album_accent_comp", b(self.album_accent_comp));
         storage.set_string("accent_controls", b(self.accent_controls));
         storage.set_string("anim_bg", b(self.anim_bg));
         storage.set_string("glass_on", b(self.glass_on));

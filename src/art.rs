@@ -14,6 +14,10 @@ pub struct Art {
     pub rgba: Vec<u8>,
     /// Most vivid colour, lifted for use on dark backgrounds (progress bar, highlights).
     pub accent: Color32,
+    /// Dynamic album accent colour extracted with FocusGrow's grid-averaging HSL algorithm.
+    pub album_accent: Color32,
+    /// 180-degree complementary hue variant of [`Self::album_accent`].
+    pub album_accent_comp: Color32,
     /// How bright the cover is overall, 0..1.
     pub brightness: f32,
 }
@@ -32,7 +36,9 @@ fn process_rgb(img: &image::RgbImage) -> Art {
 /// The accent, tint and blur of a cover already SIZE×SIZE.
 fn process_small(small: &image::RgbImage) -> Art {
     let accent = palette(small);
-    backdrop(small.pixels().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect(), accent)
+    let album_accent = extract_album_accent(small, false);
+    let album_accent_comp = extract_album_accent(small, true);
+    backdrop(small.pixels().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect(), accent, album_accent, album_accent_comp)
 }
 
 /// A frame of an animated cover as the cover art, as a still cover's would be (accent,
@@ -50,7 +56,7 @@ pub fn from_cover_frame(frame: &egui::ColorImage) -> Option<Art> {
 }
 
 /// SIZE×SIZE pixels (0–255) made into the backdrop, tinted toward `accent`.
-fn backdrop(mut px: Vec<[f32; 3]>, accent: Color32) -> Art {
+fn backdrop(mut px: Vec<[f32; 3]>, accent: Color32, album_accent: Color32, album_accent_comp: Color32) -> Art {
     let brightness = px.iter().map(|p| (0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]) / 255.0).sum::<f32>() / px.len().max(1) as f32;
 
     // Kawarp's tint pass: pull near-black regions toward the accent so dark covers
@@ -68,7 +74,7 @@ fn backdrop(mut px: Vec<[f32; 3]>, accent: Color32) -> Art {
         px = box_blur(&px, SIZE as usize, 6);
     }
     let rgba = px.iter().flat_map(|p| [p[0] as u8, p[1] as u8, p[2] as u8, 255]).collect();
-    Art { rgba, accent, brightness }
+    Art { rgba, accent, album_accent, album_accent_comp, brightness }
 }
 
 /// `passes` more of the art's blur (a theme's `blurPasses` over the usual).
@@ -97,12 +103,18 @@ pub fn from_frame(frame: &egui::ColorImage) -> Option<Art> {
             px.push([c.r() as f32, c.g() as f32, c.b() as f32]);
         }
     }
-    let brightness = px.iter().map(|p| (0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]) / 255.0).sum::<f32>() / px.len() as f32;
+    let brightness = px.iter().map(|p| (0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]) / 255.0).sum::<f32>() / px.len().max(1) as f32;
     for _ in 0..2 {
         px = box_blur(&px, n, 4);
     }
     let rgba = px.iter().flat_map(|p| [p[0] as u8, p[1] as u8, p[2] as u8, 255]).collect();
-    Some(Art { rgba, accent: Color32::WHITE, brightness })
+    Some(Art {
+        rgba,
+        accent: Color32::WHITE,
+        album_accent: Color32::from_rgb(0xF1, 0xF5, 0xF9),
+        album_accent_comp: Color32::from_rgb(0xF1, 0xF5, 0xF9),
+        brightness,
+    })
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -184,7 +196,135 @@ pub fn idle() -> Art {
             rgba.extend_from_slice(&[r as u8, g as u8, b as u8, 255]);
         }
     }
-    Art { rgba, accent: Color32::from_rgb(0xff, 0x4e, 0x6a), brightness: 0.3 }
+    Art {
+        rgba,
+        accent: Color32::from_rgb(0xff, 0x4e, 0x6a),
+        album_accent: Color32::from_rgb(0xff, 0x4e, 0x6a),
+        album_accent_comp: Color32::from_rgb(0x4e, 0xff, 0xe3),
+        brightness: 0.3,
+    }
+}
+
+/// Extracts a dynamic, vivid accent colour from an album cover using FocusGrow's algorithm:
+/// - Samples up to a 32×32 grid, ignoring near-black (`<= 20`), near-white (`>= 250`), and
+///   low-saturation (`<= 0.22`) pixels.
+/// - Returns soft light slate (`#F1F5F9`) for monochrome/desaturated covers.
+/// - Lifts saturation and clamps lightness in HSL so the accent stays readable and vibrant;
+///   when `use_complementary` is true, rotates hue by 180° for high-contrast accents.
+/// - Falls back to `#80D8FF` if the resulting luminance is below `0.12`.
+pub fn extract_album_accent(img: &image::RgbImage, use_complementary: bool) -> Color32 {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Color32::from_rgb(0xF1, 0xF5, 0xF9);
+    }
+    let step_x = (w / 32).max(1);
+    let step_y = (h / 32).max(1);
+
+    let mut total_sampled: usize = 0;
+    let mut color_count: usize = 0;
+    let (mut sum_r, mut sum_g, mut sum_b) = (0.0_f64, 0.0_f64, 0.0_f64);
+
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            let p = img.get_pixel(x, y);
+            let (r, g, b) = (p[0], p[1], p[2]);
+            total_sampled += 1;
+            let max_c = r.max(g).max(b);
+            let min_c = r.min(g).min(b);
+            if max_c > 20 && max_c < 250 {
+                let sat = (max_c - min_c) as f64 / max_c as f64;
+                if sat > 0.22 {
+                    sum_r += r as f64;
+                    sum_g += g as f64;
+                    sum_b += b as f64;
+                    color_count += 1;
+                }
+            }
+            x += step_x;
+        }
+        y += step_y;
+    }
+
+    let min_colored = (total_sampled / 10).max(12);
+    if color_count < min_colored {
+        return Color32::from_rgb(0xF1, 0xF5, 0xF9);
+    }
+
+    let avg_r = (sum_r / color_count as f64) / 255.0;
+    let avg_g = (sum_g / color_count as f64) / 255.0;
+    let avg_b = (sum_b / color_count as f64) / 255.0;
+
+    let (mut hue, mut sat, mut light) = rgb_to_hsl(avg_r, avg_g, avg_b);
+    if use_complementary && sat > 0.08 {
+        hue = (hue + 0.5) % 1.0;
+        sat = sat.max(0.76);
+        light = light.clamp(0.56, 0.72);
+    } else {
+        sat = sat.max(0.65);
+        light = light.clamp(0.55, 0.75);
+    }
+
+    let (r, g, b) = hsl_to_rgb(hue, sat, light);
+    let luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    if luminance < 0.12 {
+        return Color32::from_rgb(0x80, 0xD8, 0xFF);
+    }
+
+    Color32::from_rgb(
+        (r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (b * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn rgb_to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    if d <= 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let mut h = if (max - r).abs() < 1e-6 {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if (max - g).abs() < 1e-6 {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    h /= 6.0;
+    (h.rem_euclid(1.0), s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
+}
+
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    if s <= 1e-6 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    (hue_to_rgb(p, q, h + 1.0 / 3.0), hue_to_rgb(p, q, h), hue_to_rgb(p, q, h - 1.0 / 3.0))
+}
+
+fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 0.5 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
 }
 
 /// Below this, a background behind white text is left as the theme has it.
@@ -208,7 +348,7 @@ pub fn readable_dim(shown: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{READABLE_CAP, READABLE_KNEE, from_cover_frame, process_rgb, readable_dim};
+    use super::{READABLE_CAP, READABLE_KNEE, extract_album_accent, from_cover_frame, process_rgb, readable_dim};
 
     #[test]
     fn a_cover_frame_gives_a_still_covers_colours() {
@@ -216,10 +356,22 @@ mod tests {
         let frame = egui::ColorImage::new([300, 300], vec![egui::Color32::from_rgb(180, 60, 120); 300 * 300]);
         let still = process_rgb(&image::RgbImage::from_pixel(300, 300, image::Rgb([180, 60, 120])));
         let art = from_cover_frame(&frame).unwrap();
-        assert_eq!((art.accent, art.rgba), (still.accent, still.rgba));
+        assert_eq!((art.accent, art.album_accent, art.rgba), (still.accent, still.album_accent, still.rgba));
         assert!(from_cover_frame(&egui::ColorImage::new([0, 0], vec![])).is_none());
     }
 
+    #[test]
+    fn album_accent_matches_focusgrow_rules() {
+        let grey = image::RgbImage::from_pixel(32, 32, image::Rgb([140, 140, 140]));
+        assert_eq!(extract_album_accent(&grey, false), egui::Color32::from_rgb(0xF1, 0xF5, 0xF9));
+        let dark = image::RgbImage::from_pixel(32, 32, image::Rgb([12, 12, 12]));
+        assert_eq!(extract_album_accent(&dark, false), egui::Color32::from_rgb(0xF1, 0xF5, 0xF9));
+        let red = image::RgbImage::from_pixel(32, 32, image::Rgb([220, 30, 40]));
+        let normal = extract_album_accent(&red, false);
+        let comp = extract_album_accent(&red, true);
+        assert!(normal.r() > normal.b());
+        assert!(comp.g() > comp.r() && comp.b() > comp.r());
+    }
 
     #[test]
     fn dark_backgrounds_are_left_alone() {

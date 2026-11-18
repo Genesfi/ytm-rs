@@ -106,7 +106,7 @@ impl App {
         let at = shifted(self.current_at(), -self.video_offset());
         self.playing_as = None;
         if self.playing() || self.buffering {
-            self.play_current_at(at, false);
+            self.start_current(at, false, true);
         } else {
             self.resume_at = Some(at);
         }
@@ -364,8 +364,16 @@ impl App {
         let Some(track) = self.current().cloned() else { return };
         // Picking up mid-song (a resume, a download that broke off): the position is the
         // song version's when one was playing, so that goes on; a music video stays one.
-        // Likewise a song's music video.
-        let carried = if (at.is_zero() && !swap) || self.jam.active() { None } else { self.playing_as().cloned() };
+        // Likewise a song's music video. When the user picked Video mode, automatically
+        // resolve & play each incoming song's music video if it has one.
+        let mut carried = if (at.is_zero() && !swap) || self.jam.active() { None } else { self.playing_as().cloned() };
+        let mut at = at;
+        if carried.is_none() && self.show_video && !swap && at.is_zero() && !self.jam.active() && !track.has_video() {
+            if let Some(found) = self.song_video().cloned() {
+                carried = Some(found.video);
+                at = shifted(Duration::ZERO, found.offset_ms);
+            }
+        }
         self.queue.started();
         self.resume_at = None;
         self.resume_counts = false;
@@ -383,9 +391,16 @@ impl App {
         self.audio.status.wanted_gen.store(self.generation, Ordering::Relaxed);
         let shown = carried.clone().unwrap_or_else(|| track.clone());
         self.audio.status.duration_ms.store(shown.duration.map_or(0, |d| d as u64 * 1000), Ordering::Relaxed);
-        // A song running into the next crossfades (so does Next, when that's switched
-        // on); going back or picking a song cuts over.
-        self.audio.send(if self.handoff && at.is_zero() { AudioCmd::Handoff } else { AudioCmd::Stop });
+        // A Song↔Video swap smoothly crossfades over 450 ms without cutting to silence;
+        // a song running into the next uses Handoff when crossfade is on; otherwise Stop.
+        let cmd = if swap {
+            AudioCmd::CrossfadeSwap(450)
+        } else if self.handoff && at.is_zero() {
+            AudioCmd::Handoff
+        } else {
+            AudioCmd::Stop
+        };
+        self.audio.send(cmd);
         self.audio.send(AudioCmd::Warm);
         self.buffering = true;
         self.seek_drag = None;

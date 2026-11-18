@@ -33,6 +33,10 @@ pub enum AudioCmd {
     /// Another song is on its way: with crossfade on, fade this one out instead of
     /// stopping it, and fade the next one in when it starts.
     Handoff,
+    /// Switching between Song and Video versions of the same track: keep playing seamlessly
+    /// until the swapped stream is ready, then crossfade over the given duration (ms)
+    /// regardless of the global song-to-song crossfade setting.
+    CrossfadeSwap(u32),
     Seek(Duration),
     /// A song was asked for: open the device now, while its stream is still on the way.
     Warm,
@@ -509,13 +513,16 @@ struct Fading {
     /// Still at full volume, waiting for the next song to start (as Morphe does): when
     /// that was asked for, and how much of this song was left then.
     waiting: Option<(Instant, Option<Duration>)>,
+    /// Optional per-handoff fade duration (ms), used by Song↔Video crossfade swaps.
+    override_ms: Option<u32>,
 }
 
 impl Fading {
     /// Start the fade-out, over what's left of the song if that's shorter. Returns its length.
     fn start(&mut self, crossfade: u32) -> u32 {
+        let target = self.override_ms.unwrap_or(crossfade);
         let left = self.waiting.take().and_then(|(at, left)| Some(left?.saturating_sub(at.elapsed())));
-        let len = crossfade.min(left.map_or(u32::MAX, |l| l.as_millis() as u32)).max(QUICK_FADE_MS);
+        let len = target.min(left.map_or(u32::MAX, |l| l.as_millis() as u32)).max(QUICK_FADE_MS);
         self.out.store(len, Ordering::Relaxed);
         len
     }
@@ -1020,6 +1027,23 @@ fn run(
                     wake();
                 }
             }
+            Ok(AudioCmd::CrossfadeSwap(ms)) => {
+                // Any older fade ends smoothly (no click) before handing off the current stream.
+                for f in fading.iter_mut() {
+                    f.waiting = None;
+                    f.out.store(QUICK_FADE_MS, Ordering::Relaxed);
+                }
+                if current != 0 && !player.is_paused() && !player.empty() {
+                    let left = length.map(|d| d.saturating_sub(song_pos(&song_ms)).div_f32(status.speed()));
+                    log::debug!("audio: crossfade swap from generation {current} over {ms} ms");
+                    let old = std::mem::replace(&mut player, Player::connect_new(&output.mixer));
+                    fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: Some((Instant::now(), left)), override_ms: Some(ms) });
+                } else {
+                    clear(&mut player, &output);
+                }
+                current = 0;
+                prepared_seek = Prepared::default();
+            }
             // One crossfade at a time: skipping again mid-fade cuts over (below) instead
             // of piling a third song on.
             Ok(AudioCmd::Handoff)
@@ -1034,7 +1058,7 @@ fn run(
                 let left = length.map(|d| d.saturating_sub(song_pos(&song_ms)).div_f32(status.speed()));
                 log::debug!("audio: handing off from generation {current}, {left:?} left");
                 let old = std::mem::replace(&mut player, Player::connect_new(&output.mixer));
-                fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: Some((Instant::now(), left)) });
+                fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: Some((Instant::now(), left)), override_ms: None });
                 current = 0;
                 prepared_seek = Prepared::default();
                 status.playing.store(false, Ordering::Relaxed);
@@ -1053,7 +1077,7 @@ fn run(
                     if current != 0 && !player.is_paused() && !player.empty() {
                         fade_out.store(QUICK_FADE_MS, Ordering::Relaxed);
                         let old = std::mem::replace(&mut player, Player::connect_new(&output.mixer));
-                        fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: None });
+                        fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: None, override_ms: None });
                     } else {
                         clear(&mut player, &output);
                     }

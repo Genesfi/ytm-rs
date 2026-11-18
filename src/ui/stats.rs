@@ -146,6 +146,10 @@ pub(super) struct StatsState {
     data_note: Option<String>,
     /// Result of saving the Wrapped card PNG (written from the screenshot callback).
     save_note: Arc<Mutex<Option<String>>>,
+    /// Path of the most recently saved Wrapped card PNG (for "Open folder" / "Open image").
+    last_saved: Arc<Mutex<Option<PathBuf>>>,
+    /// When set, paints the Wrapped card on a 1-frame top overlay so it can be captured from any scroll position.
+    capture_overlay: Option<String>,
     /// Last drawn screen rect of the Wrapped card, for cropping the screenshot.
     card_rect: Option<Rect>,
     /// Pending background reload result.
@@ -172,6 +176,8 @@ impl StatsState {
             undo: None,
             data_note: None,
             save_note: Arc::new(Mutex::new(None)),
+            last_saved: Arc::new(Mutex::new(None)),
+            capture_overlay: None,
             card_rect: None,
             pending_load: Arc::new(Mutex::new(None)),
             loading: false,
@@ -517,28 +523,57 @@ impl App {
     }
 
     fn save_wrapped_png(&mut self, ctx: &egui::Context, period_label: &str) {
-        let Some(rect) = self.stats.card_rect else { return };
         let screen = ctx.content_rect();
-        if rect.top() < screen.top() || rect.bottom() > screen.bottom() || rect.left() < screen.left() || rect.right() > screen.right() {
-            *self.stats.save_note.lock().unwrap() = Some("Scroll until the whole Wrapped card is visible, then click Save again.".into());
+        if let Some(rect) = self.stats.card_rect
+            && rect.top() >= screen.top()
+            && rect.bottom() <= screen.bottom()
+            && rect.left() >= screen.left()
+            && rect.right() <= screen.right()
+        {
+            self.capture_wrapped_rect(ctx, rect, period_label);
             return;
         }
+        if screen.width() < CARD_W || screen.height() < CARD_H {
+            *self.stats.save_note.lock().unwrap() = Some("Make the window a little bigger (at least 480×600) to save the card.".into());
+            return;
+        }
+        // Card is scrolled partially off-screen: paint it cleanly on a 1-frame overlay inside
+        // the viewport so saving always works without asking the user to scroll manually.
+        self.stats.capture_overlay = Some(period_label.to_owned());
+        *self.stats.save_note.lock().unwrap() = Some("Saving…".into());
+        ctx.request_repaint();
+    }
+
+    fn capture_wrapped_rect(&mut self, ctx: &egui::Context, rect: Rect, period_label: &str) {
         let stem = format!("YT Music Wrapped {} - {}", period_label.replace(['/', '\\', ':'], "-"), self.stats.style.name());
         let out_path = stats::unique_png_name(&stats::pictures_dir(), &stem);
         let ppp = ctx.pixels_per_point();
         let note_slot = self.stats.save_note.clone();
+        let saved_slot = self.stats.last_saved.clone();
         *note_slot.lock().unwrap() = Some("Saving…".into());
         let wake = ctx.clone();
         ctx.request_screenshot(move |img| {
             let res = crop_and_save_png(&img, rect, ppp, &out_path);
             let msg = match res {
-                Ok(()) => format!("Saved to {}", out_path.display()),
+                Ok(()) => {
+                    *saved_slot.lock().unwrap() = Some(out_path.clone());
+                    format!("Saved to {}", out_path.file_name().and_then(|n| n.to_str()).unwrap_or("Pictures"))
+                }
                 Err(e) => format!("Couldn't save it: {e:#}"),
             };
             *note_slot.lock().unwrap() = Some(msg);
             wake.request_repaint();
         });
     }
+}
+
+fn open_saved_image(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
 
 fn crop_and_save_png(img: &egui::ColorImage, rect: Rect, ppp: f32, out: &PathBuf) -> anyhow::Result<()> {
@@ -574,16 +609,11 @@ pub fn page(app: &mut App, ui: &mut Ui) {
         app.stats_sync_check(true);
     }
 
-    let max_w = ui.available_width().min(1080.0);
-    let side_pad = ((ui.available_width() - max_w) * 0.5).max(0.0);
+    let max_w = ui.available_width().min(1160.0);
 
-    ui.horizontal(|ui| {
-        if side_pad > 0.0 {
-            ui.add_space(side_pad);
-        }
-        ui.vertical(|ui| {
-            ui.set_max_width(max_w);
-            ui.set_min_width(max_w);
+    ui.vertical(|ui| {
+        ui.set_max_width(max_w);
+        ui.set_min_width(max_w);
 
             if app.stats.listens.is_none() {
                 page_title(ui, "Stats");
@@ -643,7 +673,6 @@ pub fn page(app: &mut App, ui: &mut Ui) {
             ui.add_space(32.0);
             manage_section(app, ui, Some(&summary), has_history);
         });
-    });
 }
 
 fn card_fill() -> Color32 {
@@ -1581,7 +1610,7 @@ fn wrapped_section(app: &mut App, ui: &mut Ui, s: &Summary) {
     let mut save_clicked = false;
     let mut picked_style: Option<WrappedStyle> = None;
 
-    let draw_left = |ui: &mut Ui, card_rect_out: &mut Option<Rect>, save_clicked: &mut bool, save_note: &Option<String>| {
+    let draw_left = |ui: &mut Ui, card_rect_out: &mut Option<Rect>, save_clicked: &mut bool, save_note: &Option<String>, last_saved: &Option<PathBuf>| {
         ui.vertical(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(CARD_W, CARD_H), Sense::hover());
             *card_rect_out = Some(rect);
@@ -1590,14 +1619,23 @@ fn wrapped_section(app: &mut App, ui: &mut Ui, s: &Summary) {
 
             ui.add_space(14.0);
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(12.0, 8.0);
+                ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
                 if accent_pill(ui, "Save as picture", Some(icon::DOWNLOAD), accent).clicked() {
                     *save_clicked = true;
                 }
-                if let Some(note) = save_note {
-                    ui.label(RichText::new(note).font(theme::regular(12.0)).color(theme::text_dim()));
+                if let Some(path) = last_saved {
+                    if pill(ui, "Open folder", Some(icon::FOLDER_OPEN), false).clicked() {
+                        crate::downloads::show_file(path);
+                    }
+                    if pill(ui, "Open image", None, false).clicked() {
+                        open_saved_image(path);
+                    }
                 }
             });
+            if let Some(note) = save_note {
+                ui.add_space(6.0);
+                ui.label(RichText::new(note).font(theme::regular(12.0)).color(theme::text_dim()));
+            }
         });
     };
 
@@ -1643,15 +1681,16 @@ fn wrapped_section(app: &mut App, ui: &mut Ui, s: &Summary) {
     };
 
     let save_note = app.stats.save_note.lock().unwrap().clone();
+    let last_saved = app.stats.last_saved.lock().unwrap().clone();
     let mut card_rect = None;
     if wide {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 32.0;
-            draw_left(ui, &mut card_rect, &mut save_clicked, &save_note);
+            draw_left(ui, &mut card_rect, &mut save_clicked, &save_note, &last_saved);
             draw_picker(ui, &mut picked_style);
         });
     } else {
-        draw_left(ui, &mut card_rect, &mut save_clicked, &save_note);
+        draw_left(ui, &mut card_rect, &mut save_clicked, &save_note, &last_saved);
         ui.add_space(20.0);
         draw_picker(ui, &mut picked_style);
     }
@@ -1660,9 +1699,27 @@ fn wrapped_section(app: &mut App, ui: &mut Ui, s: &Summary) {
     if let Some(opt) = picked_style {
         app.stats.style = opt;
         *app.stats.save_note.lock().unwrap() = None;
+        *app.stats.last_saved.lock().unwrap() = None;
     }
     if save_clicked {
         app.save_wrapped_png(ui.ctx(), &s.label);
+    }
+    if let Some(label) = app.stats.capture_overlay.take() {
+        let screen = ui.ctx().content_rect();
+        let origin = pos2(
+            (screen.center().x - CARD_W * 0.5).clamp(screen.left(), (screen.right() - CARD_W).max(screen.left())),
+            (screen.center().y - CARD_H * 0.5).clamp(screen.top(), (screen.bottom() - CARD_H).max(screen.top())),
+        );
+        let overlay_rect = Rect::from_min_size(origin, vec2(CARD_W, CARD_H));
+        egui::Area::new(egui::Id::unique("wrapped-capture-overlay"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(origin)
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                let (rect, _) = ui.allocate_exact_size(vec2(CARD_W, CARD_H), Sense::hover());
+                draw_wrapped_card(ui, rect, style, &data);
+            });
+        app.capture_wrapped_rect(ui.ctx(), overlay_rect, &label);
     }
 }
 
