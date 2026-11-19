@@ -605,7 +605,6 @@ fn to_image(yuv: &openh264::decoder::DecodedYUV, colors: Colors) -> egui::ColorI
 
 fn run(stream: &VideoStream, http: &reqwest::Client, status: &AudioStatus, shared: &Shared) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let download = |from: u64, to: u64| Download { rt: &rt, http, url: &stream.url, from, to, resp: None, tries: 0 };
     let download = |from: u64, to: u64| Download { rt: &rt, http, url: &stream.url, from, to, resp: None, tries: 0, shared };
     // The header and the index after it, in one request.
     let start = download(0, stream.index.1).all()?;
@@ -764,9 +763,6 @@ impl Download<'_> {
                 return Ok(false);
             }
             let got = self.rt.block_on(async {
-                if self.resp.is_none() {
-                    let url = format!("{}&range={at}-{}", self.url, self.to);
-                    self.resp = Some(self.http.get(&url).header("User-Agent", crate::innertube::UA).timeout(Duration::from_secs(30)).send().await?.error_for_status()?);
                 tokio::select! {
                     biased;
                     () = self.shared.cancelled() => anyhow::Ok(None),
@@ -778,7 +774,6 @@ impl Download<'_> {
                         anyhow::Ok(self.resp.as_mut().expect("just set").chunk().await?)
                     } => res,
                 }
-                anyhow::Ok(self.resp.as_mut().expect("just set").chunk().await?)
             });
             if self.shared.stop.load(Ordering::Relaxed) {
                 return Ok(false);
@@ -921,7 +916,6 @@ fn loop_times(pts: &[f64]) -> (Vec<f64>, f64) {
 
 fn run_loop(url: &str, http: &reqwest::Client, side: u32, shared: &Shared) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let clip = rt.block_on(crate::canvas::load(http, url, side))?;
     let Some(clip) = rt.block_on(async {
         tokio::select! {
             biased;
