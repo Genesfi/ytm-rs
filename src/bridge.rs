@@ -342,6 +342,11 @@ fn read_client_frame(stream: &mut TcpStream) -> std::io::Result<Option<String>> 
         None
     };
 
+    const MAX_FRAME_BYTES: usize = 64 * 1024;
+    if payload_len > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
+    }
+
     let mut payload = vec![0u8; payload_len];
     stream.read_exact(&mut payload)?;
 

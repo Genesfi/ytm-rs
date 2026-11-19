@@ -90,6 +90,9 @@ impl App {
         let id = a.id.clone().unwrap_or_default();
         if !self.artist_pics.contains_key(&id) {
             let name = a.name.clone();
+            if self.artist_pics.len() >= 500 {
+                self.artist_pics.clear();
+            }
             self.artist_pics.insert(id.clone(), None);
             self.backend.request(backend::Req::ArtistPicture { id, name });
         }

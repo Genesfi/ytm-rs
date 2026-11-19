@@ -58,6 +58,13 @@ fn store(cache: &Mutex<HashMap<String, Entry>>, uri: &str, entry: Entry) {
     let mut cache = cache.lock().unwrap();
     let Some(slot) = cache.get_mut(uri) else { return };
     *slot = entry;
+    // Prune expired failure markers so 404 thumbnails (e.g. maxresdefault) don't grow forever.
+    if cache.len() > 512 {
+        cache.retain(|k, e| match e {
+            Entry::Failed(_, at) if k != uri && at.elapsed() >= RETRY_AFTER => false,
+            _ => true,
+        });
+    }
     let mut total: usize = cache.values().map(|e| if let Entry::Ready(b, _) = e { b.len() } else { 0 }).sum();
     if total <= BYTES_BUDGET {
         return;
@@ -243,9 +250,16 @@ impl TextureLoader for Textures {
                 return Ok(TexturePoll::Ready { texture: SizedTexture::new(t.handle.id(), t.size) });
             }
         }
-        match ctx.try_load_image(uri, size_hint)? {
-            ImagePoll::Pending { size } => Ok(TexturePoll::Pending { size }),
-            ImagePoll::Ready { image } => {
+        match ctx.try_load_image(uri, size_hint) {
+            Err(e) => {
+                // Don't let egui_extras' ImageCrateLoader retain failed decode entries forever.
+                for l in ctx.loaders().image.lock().iter() {
+                    l.forget(uri);
+                }
+                Err(e)
+            }
+            Ok(ImagePoll::Pending { size }) => Ok(TexturePoll::Pending { size }),
+            Ok(ImagePoll::Ready { image }) => {
                 let size = image.source_size;
                 let handle = ctx.load_texture(uri, image, options);
                 let texture = SizedTexture::new(handle.id(), size);

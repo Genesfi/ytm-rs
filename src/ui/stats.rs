@@ -123,6 +123,19 @@ struct Cached {
     offset: i64,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct PlayedLatelyKey {
+    rev: u64,
+    current_id: Option<String>,
+    hide_explicit: bool,
+    limit: usize,
+}
+
+struct PlayedLatelyCache {
+    key: PlayedLatelyKey,
+    cards: Rc<Vec<Card>>,
+}
+
 struct LoadedPayload {
     listens: Vec<Listen>,
     hidden: Hidden,
@@ -159,6 +172,7 @@ pub(super) struct StatsState {
     hidden_stamp: FileStamp,
     last_sync_check: Option<Instant>,
     cache: Option<Cached>,
+    played_lately: Option<PlayedLatelyCache>,
 }
 
 impl StatsState {
@@ -185,6 +199,7 @@ impl StatsState {
             hidden_stamp: FileStamp::default(),
             last_sync_check: None,
             cache: None,
+            played_lately: None,
         }
     }
 }
@@ -352,8 +367,19 @@ impl App {
 
     /// Most recently played unique songs for the Home "Played lately" shelf: the currently
     /// playing track immediately at the front, followed by shared listening history in reverse
-    /// chronological order (auto-synced with NabyTune's `listens.jsonl`).
-    pub(super) fn played_lately_cards(&self, limit: usize) -> Vec<Card> {
+    /// chronological order (auto-synced with NabyTune's `listens.jsonl`). Cached across frames
+    /// so 60–120 FPS animations on Home do zero per-frame allocations.
+    pub(super) fn played_lately_cards(&mut self, limit: usize) -> Rc<Vec<Card>> {
+        let current_id = self.current().or_else(|| self.heard_song()).map(|t| t.id.clone());
+        let key = PlayedLatelyKey {
+            rev: self.stats.rev,
+            current_id,
+            hide_explicit: self.hide_explicit,
+            limit,
+        };
+        if let Some(c) = self.stats.played_lately.as_ref().filter(|c| c.key == key) {
+            return c.cards.clone();
+        }
         let mut cards = Vec::with_capacity(limit);
         let mut seen = std::collections::HashSet::with_capacity(limit);
 
@@ -421,6 +447,8 @@ impl App {
                 });
             }
         }
+        let cards = Rc::new(cards);
+        self.stats.played_lately = Some(PlayedLatelyCache { key, cards: cards.clone() });
         cards
     }
 

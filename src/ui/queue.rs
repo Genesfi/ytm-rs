@@ -435,6 +435,22 @@ impl Queue {
         let added: Vec<Track> = tracks.into_iter().filter(|t| t.id != seed && !have.contains(&t.id) && !(self.hide_explicit && t.explicit)).collect();
         self.elsewhere.extend(added.iter().map(|t| t.id.clone()));
         self.tracks.extend(added);
+        // Trim very old played history during multi-hour autoplay sessions so the queue
+        // and `elsewhere` set don't grow unboundedly (still keeping plenty of Back history).
+        const AUTOPLAY_TRIM_AT: usize = 500;
+        const KEEP_PLAYED: usize = 150;
+        if self.tracks.len() > AUTOPLAY_TRIM_AT
+            && let Some(cur) = self.index
+            && cur > KEEP_PLAYED
+        {
+            let drop_n = cur - KEEP_PLAYED;
+            self.tracks.drain(..drop_n);
+            self.index = Some(cur - drop_n);
+            if !self.elsewhere.is_empty() {
+                let keep: std::collections::HashSet<&str> = self.tracks.iter().map(|t| t.id.as_str()).collect();
+                self.elsewhere.retain(|id| keep.contains(id.as_str()));
+            }
+        }
         was_at_end
     }
 

@@ -1218,6 +1218,9 @@ impl App {
             return;
         }
         let prev = std::mem::replace(&mut self.page, page);
+        if self.back.len() >= 100 {
+            self.back.remove(0);
+        }
         self.back.push(prev);
         self.forward.clear();
         self.page_loaded();

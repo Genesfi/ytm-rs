@@ -248,9 +248,34 @@ impl Shared {
 
     /// Stop downloading (e.g. a prefetch that was superseded).
     pub fn cancel(&self) {
-        self.inner.lock().unwrap().cancelled = true;
+        let mut inner = self.inner.lock().unwrap();
+        inner.cancelled = true;
+        // No reader can ever touch these blocks again: free them immediately (up to 40 MB)
+        // instead of waiting for any in-flight worker tasks to unwind.
+        if inner.readers == 0 {
+            for b in &mut inner.blocks {
+                *b = None;
+            }
+        }
+        drop(inner);
         self.ready.notify_all();
         self.changed.notify_waiters();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.inner.lock().unwrap().cancelled
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     fn claim(&self) -> Claim {
@@ -277,8 +302,11 @@ impl Shared {
 
     fn put(&self, idx: usize, data: Bytes) {
         let mut inner = self.inner.lock().unwrap();
-        inner.blocks[idx] = Some(data);
         inner.in_flight[idx] = false;
+        if inner.cancelled {
+            return;
+        }
+        inner.blocks[idx] = Some(data);
         if !std::mem::replace(&mut inner.ever[idx], true) {
             inner.fetched += 1;
             if inner.fetched == inner.blocks.len() {
@@ -374,7 +402,11 @@ pub async fn download_behind(http: reqwest::Client, media: Media, ua: String, sh
             loop {
                 if let Some(ahead) = &ahead {
                     while ahead().is_some_and(|s| !Arc::ptr_eq(&s, &shared) && s.filling()) {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        tokio::select! {
+                            biased;
+                            () = shared.cancelled() => return,
+                            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+                        }
                     }
                 }
                 // Registered before claiming, so a change in between isn't missed.
@@ -409,7 +441,11 @@ pub async fn download_behind(http: reqwest::Client, media: Media, ua: String, sh
                     } else if segments.is_none() && idx >= REFUSE_FROM.load(std::sync::atomic::Ordering::Relaxed) {
                         Err(anyhow::Error::new(SimulatedRefusal))
                     } else {
-                        fetch(&client, &url, &ua, range).await
+                        tokio::select! {
+                            biased;
+                            () = shared.cancelled() => return,
+                            res = fetch(&client, &url, &ua, range) => res,
+                        }
                     };
                     match res {
                         Ok(data) => {
@@ -420,7 +456,11 @@ pub async fn download_behind(http: reqwest::Client, media: Media, ua: String, sh
                         Err(e) if attempt < RETRIES && !is_forbidden(&e) => {
                             attempt += 1;
                             log::warn!("{what}: {e:#} (retry {attempt})");
-                            tokio::time::sleep(Duration::from_millis(400 * (attempt * attempt) as u64)).await;
+                            tokio::select! {
+                                biased;
+                                () = shared.cancelled() => return,
+                                () = tokio::time::sleep(Duration::from_millis(400 * (attempt * attempt) as u64)) => {}
+                            }
                         }
                         Err(e) => {
                             // How many fresh URLs were tried tells a URL that keeps being

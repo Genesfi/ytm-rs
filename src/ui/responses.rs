@@ -343,6 +343,9 @@ impl App {
             }
             Resp::CommentsPage { token, page } => super::comments::on_page(&token, page),
             Resp::ArtistPicture { id, pic } => {
+                if self.artist_pics.len() >= 500 && !self.artist_pics.contains_key(&id) {
+                    self.artist_pics.clear();
+                }
                 self.artist_pics.insert(id, pic);
             }
             Resp::Segments { video_id, segments } => {

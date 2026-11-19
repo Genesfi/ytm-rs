@@ -311,15 +311,50 @@ pub(super) fn dev_memory(ctx: &egui::Context, now: f64) {
     );
 }
 
-/// The process's resident memory as Linux counts it (`; VmRSS … RssAnon … RssFile …`), so
-/// the `YTM_MEM` line alone shows whether it's growing; empty elsewhere.
+/// The process's resident memory (`; VmRSS …` on Linux, `; Private … MB, WorkingSet … MB`
+/// on Windows), so the `YTM_MEM` line alone shows whether it's growing.
 fn process_memory() -> String {
-    let status = if cfg!(target_os = "linux") { std::fs::read_to_string("/proc/self/status").unwrap_or_default() } else { String::new() };
-    let fields: Vec<String> = status
-        .lines()
-        .filter_map(|l| l.split_once(':'))
-        .filter(|(k, _)| matches!(*k, "VmRSS" | "RssAnon" | "RssFile"))
-        .map(|(k, v)| format!("{k} {}", v.trim()))
-        .collect();
-    if fields.is_empty() { String::new() } else { format!("; {}", fields.join(", ")) }
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let fields: Vec<String> = status
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(k, _)| matches!(*k, "VmRSS" | "RssAnon" | "RssFile"))
+            .map(|(k, v)| format!("{k} {}", v.trim()))
+            .collect();
+        return if fields.is_empty() { String::new() } else { format!("; {}", fields.join(", ")) };
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct ProcessMemoryCountersEx {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+            private_usage: usize,
+        }
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn K32GetProcessMemoryInfo(process: *mut std::ffi::c_void, counters: *mut ProcessMemoryCountersEx, cb: u32) -> i32;
+        }
+        let mut info = ProcessMemoryCountersEx { cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32, ..Default::default() };
+        // SAFETY: queries current process memory counters into our own zero-initialized struct.
+        let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut info, info.cb) };
+        if ok != 0 {
+            let mb = |b: usize| b as f64 / (1024.0 * 1024.0);
+            return format!("; Private {:.1} MB, WorkingSet {:.1} MB", mb(info.private_usage), mb(info.working_set_size));
+        }
+        return String::new();
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    String::new()
 }

@@ -481,6 +481,31 @@ struct Shared {
     frames: Mutex<VecDeque<Frame>>,
     stop: AtomicBool,
     failed: AtomicBool,
+    cancel: tokio::sync::Notify,
+}
+
+impl Shared {
+    fn stop_now(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.cancel.notify_waiters();
+        // Free decoded RGBA frames immediately (42–95 MB at 720p–1080p) instead of
+        // waiting for the background thread to unwind.
+        if let Ok(mut frames) = self.frames.lock() {
+            frames.clear();
+        }
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let notified = self.cancel.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 /// A video being decoded along with the audio. Stops when dropped.
@@ -532,6 +557,7 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.stop_now();
     }
 }
 
@@ -580,8 +606,12 @@ fn to_image(yuv: &openh264::decoder::DecodedYUV, colors: Colors) -> egui::ColorI
 fn run(stream: &VideoStream, http: &reqwest::Client, status: &AudioStatus, shared: &Shared) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let download = |from: u64, to: u64| Download { rt: &rt, http, url: &stream.url, from, to, resp: None, tries: 0 };
+    let download = |from: u64, to: u64| Download { rt: &rt, http, url: &stream.url, from, to, resp: None, tries: 0, shared };
     // The header and the index after it, in one request.
     let start = download(0, stream.index.1).all()?;
+    if shared.stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     let head = start.get(..=stream.init_end as usize).ok_or_else(|| anyhow::anyhow!("short header"))?;
     let index = start.get(stream.index.0 as usize..).ok_or_else(|| anyhow::anyhow!("short index"))?;
     let track = parse_track(find(head, &["moov"]).ok_or_else(|| anyhow::anyhow!("no moov"))?).ok_or_else(|| anyhow::anyhow!("not H.264 in MP4"))?;
@@ -619,9 +649,18 @@ fn run(stream: &VideoStream, http: &reqwest::Client, status: &AudioStatus, share
         let mut dl = download(f.offset, f.offset + f.size as u64 - 1);
         let (mut bytes, mut done) = (Vec::with_capacity(f.size as usize), 0);
         loop {
+            if shared.stop.load(Ordering::Relaxed) {
+                break 'play;
+            }
             let more = dl.more(&mut bytes)?;
+            if shared.stop.load(Ordering::Relaxed) {
+                break 'play;
+            }
             let samples = parse_fragment(&bytes, &track);
             while let Some(sample) = samples.get(done).filter(|s| s.at + s.size <= bytes.len()) {
+                if shared.stop.load(Ordering::Relaxed) {
+                    break 'play;
+                }
                 done += 1;
                 let data = &bytes[sample.at..sample.at + sample.size];
                 let clock = status.position_smooth().as_secs_f64();
@@ -709,12 +748,17 @@ struct Download<'a> {
     to: u64,
     resp: Option<reqwest::Response>,
     tries: u32,
+    shared: &'a Shared,
 }
 
 impl Download<'_> {
     /// Add what has arrived since to `buf`: false once all of it has.
+    /// Add what has arrived since to `buf`: false once all of it has (or playback stopped).
     fn more(&mut self, buf: &mut Vec<u8>) -> anyhow::Result<bool> {
         loop {
+            if self.shared.stop.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
             let at = self.from + buf.len() as u64;
             if at > self.to {
                 return Ok(false);
@@ -723,9 +767,22 @@ impl Download<'_> {
                 if self.resp.is_none() {
                     let url = format!("{}&range={at}-{}", self.url, self.to);
                     self.resp = Some(self.http.get(&url).header("User-Agent", crate::innertube::UA).timeout(Duration::from_secs(30)).send().await?.error_for_status()?);
+                tokio::select! {
+                    biased;
+                    () = self.shared.cancelled() => anyhow::Ok(None),
+                    res = async {
+                        if self.resp.is_none() {
+                            let url = format!("{}&range={at}-{}", self.url, self.to);
+                            self.resp = Some(self.http.get(&url).header("User-Agent", crate::innertube::UA).timeout(Duration::from_secs(30)).send().await?.error_for_status()?);
+                        }
+                        anyhow::Ok(self.resp.as_mut().expect("just set").chunk().await?)
+                    } => res,
                 }
                 anyhow::Ok(self.resp.as_mut().expect("just set").chunk().await?)
             });
+            if self.shared.stop.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
             match got {
                 Ok(Some(chunk)) => {
                     buf.extend_from_slice(&chunk);
@@ -838,6 +895,7 @@ impl Loop {
 impl Drop for Loop {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.stop_now();
     }
 }
 
@@ -864,6 +922,18 @@ fn loop_times(pts: &[f64]) -> (Vec<f64>, f64) {
 fn run_loop(url: &str, http: &reqwest::Client, side: u32, shared: &Shared) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let clip = rt.block_on(crate::canvas::load(http, url, side))?;
+    let Some(clip) = rt.block_on(async {
+        tokio::select! {
+            biased;
+            () = shared.cancelled() => Ok(None),
+            res = crate::canvas::load(http, url, side) => res.map(Some),
+        }
+    })? else {
+        return Ok(());
+    };
+    if shared.stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     let track = parse_track(find(&clip.init, &["moov"]).ok_or_else(|| anyhow::anyhow!("no moov"))?).ok_or_else(|| anyhow::anyhow!("not H.264 in MP4"))?;
     // Every frame of the clip, as the decoder takes it: a cover's clip is short, and this
     // is a few MB at most.
@@ -894,6 +964,9 @@ fn run_loop(url: &str, http: &reqwest::Client, side: u32, shared: &Shared) -> an
         let mut pending: BinaryHeap<Pts> = BinaryHeap::new();
         let at = |pts: f64| lap as f64 * length + pts;
         for (data, pts) in &samples {
+            if shared.stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             pending.push(Pts(*pts));
             let Ok(Some(yuv)) = decoder.decode(data) else { continue };
             let Some(Pts(pts)) = pending.pop() else { continue };

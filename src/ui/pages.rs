@@ -596,7 +596,7 @@ fn played_lately_shelf(app: &mut App, ui: &mut Ui) {
     let nudge = right as i32 - left as i32;
     h_scroll(ui, "home-played-lately", nudge, cards.len(), CARD, 18.0, |ui| {
         ui.spacing_mut().item_spacing.x = 18.0;
-        for c in &cards {
+        for c in cards.iter() {
             let is_liked = matches!(&c.target, Target::Song(t) if app.liked.contains(&t.id));
             card(ui, c, CARD, is_liked, None, &mut app.actions);
         }

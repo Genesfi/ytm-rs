@@ -373,10 +373,8 @@ fn close_to_tray_saved(app_ron: &str) -> bool {
     app_ron.split_whitespace().collect::<String>().contains("\"close_to_tray\":\"1\"")
 }
 
-/// Linux: every few minutes, give the system back the memory glibc keeps after it's freed
-/// (#107). Two heaps and the early release of big blocks (`main`) leave the small pieces:
-/// glibc only shrinks a heap from its end, so a freed page between live ones stays with
-/// the app until a trim. A trim is glibc walking its heaps, on its own thread.
+/// Every few minutes, give the system back freed heap pages left fragmented after hours of
+/// playing songs, covers and video frames (#107).
 fn trim_heap_periodically() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     std::thread::Builder::new()
@@ -385,6 +383,27 @@ fn trim_heap_periodically() {
             std::thread::sleep(std::time::Duration::from_secs(180));
             // SAFETY: takes no pointers; glibc locks each heap while it trims it.
             unsafe { libc::malloc_trim(0) };
+        })
+        .ok();
+
+    #[cfg(windows)]
+    std::thread::Builder::new()
+        .name("heap-trim".into())
+        .spawn(|| {
+            unsafe extern "system" {
+                fn GetProcessHeap() -> *mut std::ffi::c_void;
+                fn HeapCompact(heap: *mut std::ffi::c_void, flags: u32) -> usize;
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(180));
+                // SAFETY: standard Win32 process heap compaction (internally serialized).
+                unsafe {
+                    let heap = GetProcessHeap();
+                    if !heap.is_null() {
+                        HeapCompact(heap, 0);
+                    }
+                }
+            }
         })
         .ok();
 }
