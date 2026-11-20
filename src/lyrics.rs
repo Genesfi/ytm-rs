@@ -316,7 +316,7 @@ impl Client {
     }
 
     async fn fetch_unison(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
-        let title_parts = clean_title(q.song);
+        let title_parts = clean_title_with_artist(q.song, q.artist);
         let mut titles = vec![q.song.to_owned()];
         if title_parts.core != q.song && !title_parts.core.is_empty() {
             titles.push(title_parts.core.clone());
@@ -346,7 +346,7 @@ impl Client {
     }
 
     async fn fetch_netease(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
-        let title_parts = clean_title(q.song);
+        let title_parts = clean_title_with_artist(q.song, q.artist);
         let clean_artist = clean_noise(&strip_brackets(q.artist.split(['/', ',', '&']).next().unwrap_or(q.artist)));
         if title_parts.core.is_empty() && title_parts.full.is_empty() {
             return Ok(vec![]);
@@ -421,10 +421,13 @@ impl Client {
                     || alt_low.as_ref().is_some_and(|a| name.contains(a) || a.contains(&clean_name))
                     || name.contains(&full_low) || full_low.contains(&clean_name);
 
+                let has_cjk = clean_name.chars().any(|c| (c as u32) >= 0x2E80);
+                let min_len = if has_cjk { 1 } else { 2 };
+
                 let mut score = 0.0f32;
                 if is_title_match {
                     score += 60.0;
-                } else if is_title_contain && clean_name.chars().count() >= 2 {
+                } else if is_title_contain && clean_name.chars().count() >= min_len {
                     score += 35.0;
                 } else {
                     // Reject unrelated song titles
@@ -508,7 +511,7 @@ impl Client {
     }
 
     async fn fetch_lrclib(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
-        let title_parts = clean_title(q.song);
+        let title_parts = clean_title_with_artist(q.song, q.artist);
         let clean_artist = clean_noise(&strip_brackets(q.artist.split(['/', ',', '&']).next().unwrap_or(q.artist)));
         let mut titles = vec![title_parts.core.clone()];
         if let Some(ref alt) = title_parts.alt {
@@ -519,6 +522,8 @@ impl Client {
         }
         titles.dedup();
 
+        let c_low = title_parts.core.to_lowercase();
+        let alt_low = title_parts.alt.as_ref().map(|s| s.to_lowercase());
         let song_ms = q.duration.unwrap_or(0) as i32 * 1000;
         let target_s = q.duration.unwrap_or(0) as f32;
 
@@ -548,10 +553,21 @@ impl Client {
             let mut plain_cand = None;
 
             for item in items {
+                let track = item["trackName"].as_str().or_else(|| item["name"].as_str()).unwrap_or("");
+                let t_clean = clean_noise(&strip_brackets(track)).to_lowercase();
                 let dur = item["duration"].as_f64().unwrap_or(0.0) as f32;
                 if target_s > 10.0 && dur > 10.0 && (dur - target_s).abs() > 30.0 {
                     continue;
                 }
+                // Verify candidate actually matches the requested title
+                let is_lrclib_match = t_clean == c_low
+                    || alt_low.as_ref().is_some_and(|a| t_clean == *a)
+                    || t_clean.contains(&c_low) || c_low.contains(&t_clean)
+                    || alt_low.as_ref().is_some_and(|a| t_clean.contains(a) || a.contains(&t_clean));
+                if !is_lrclib_match && !c_low.is_empty() {
+                    continue;
+                }
+
                 if let Some(synced) = item["syncedLyrics"].as_str().filter(|s| !s.trim().is_empty()) {
                     let mut lines = parse_lrc(synced, song_ms);
                     lrc_fixers(&mut lines);
@@ -677,7 +693,7 @@ pub fn clean_noise(s: &str) -> String {
         .join(" ")
 }
 
-pub fn clean_title(raw: &str) -> CleanTitle {
+pub fn clean_title_with_artist(raw: &str, artist: &str) -> CleanTitle {
     let bracketless = strip_brackets(raw);
     let without_pipe = bracketless.split(" | ").next().unwrap_or(&bracketless).split('｜').next().unwrap_or(&bracketless);
     let full = clean_noise(without_pipe);
@@ -687,17 +703,32 @@ pub fn clean_title(raw: &str) -> CleanTitle {
     let mut alt = None;
 
     if let Some((l, r)) = full.split_once(" - ").or_else(|| full.split_once(" — ")) {
-        let l_low = l.trim().to_lowercase();
-        let is_ep_or_ost = l_low.ends_with(" ep") || l_low.ends_with(" ost") || l_low == "ep" || l_low == "ost";
-        let left = clean_noise(l);
-        let right = clean_noise(r);
-        if !left.is_empty() && !right.is_empty() {
-            if is_ep_or_ost {
-                core = right;
-                alt = Some(left);
+        let l_clean = clean_noise(l);
+        let r_clean = clean_noise(r);
+        let l_raw_low = l.trim().to_lowercase();
+        let l_low = l_clean.to_lowercase();
+        let a_low = clean_noise(&strip_brackets(artist)).to_lowercase();
+        let is_artist_left = !a_low.is_empty() && (l_low == a_low || l_low.contains(&a_low));
+        let is_ep_or_ost = l_raw_low.ends_with(" ep") || l_raw_low.ends_with(" ost") || l_raw_low == "ep" || l_raw_low == "ost";
+
+        if is_artist_left || is_ep_or_ost {
+            // "Artist - Song" or "EP - Song": The song is on the right!
+            // Check if right has sub-title or bilingual like "青 / BLUE"
+            if let Some((sub_l, sub_r)) = r_clean.split_once(" / ").or_else(|| r_clean.split_once('／')) {
+                core = clean_noise(sub_l);
+                alt = Some(clean_noise(sub_r));
             } else {
-                core = left;
-                alt = Some(right);
+                core = r_clean;
+                alt = if is_ep_or_ost { Some(l_clean) } else { None };
+            }
+        } else {
+            let r_low = r_clean.to_lowercase();
+            let is_artist_right = !a_low.is_empty() && (r_low == a_low || r_low.contains(&a_low));
+            if is_artist_right {
+                core = l_clean;
+            } else {
+                core = l_clean;
+                alt = Some(r_clean);
             }
         }
     } else if let Some((l, r)) = full.split_once(" / ").or_else(|| full.split_once('／')) {
@@ -710,6 +741,11 @@ pub fn clean_title(raw: &str) -> CleanTitle {
     }
 
     CleanTitle { core, alt, full }
+}
+
+#[allow(dead_code)]
+pub fn clean_title(raw: &str) -> CleanTitle {
+    clean_title_with_artist(raw, "")
 }
 
 /// Parses NetEase word-by-word karaoke (`yrc.lyric`):
@@ -1886,6 +1922,10 @@ mod tests {
         let t4 = clean_title("ソラニン / ASIAN KUNG-FU GENERATION (cover)");
         assert_eq!(t4.core, "ソラニン");
         assert_eq!(t4.alt.as_deref(), Some("ASIAN KUNG-FU GENERATION"));
+
+        let t5 = clean_title_with_artist("DUSTCELL - 青 / BLUE", "DUSTCELL");
+        assert_eq!(t5.core, "青");
+        assert_eq!(t5.alt.as_deref(), Some("BLUE"));
     }
 
     #[test]
