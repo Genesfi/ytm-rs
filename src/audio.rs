@@ -461,9 +461,14 @@ impl AudioHandle {
         self.status.stereo.set(s);
     }
 
-    /// Takes effect at once; the pitch goes with it.
+    /// Takes effect at once.
     pub fn set_speed(&self, speed: f32) {
         self.status.speed.set(speed);
+    }
+
+    /// Whether the speed leaves the pitch alone, or takes it along like a record.
+    pub fn set_keep_pitch(&self, on: bool) {
+        self.status.speed.set_keep_pitch(on);
     }
 }
 
@@ -600,9 +605,9 @@ impl Normalize {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Off => "Off",
-            Self::Normal => "Normal",
-            Self::Quiet => "Quiet",
+            Self::Off => crate::tr!("ui-off"),
+            Self::Normal => crate::tr!("ui-normal"),
+            Self::Quiet => crate::tr!("ui-quiet"),
         }
     }
 

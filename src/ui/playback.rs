@@ -144,7 +144,7 @@ impl App {
         let hidden = tracks.get(start).is_some_and(|t| self.hide_explicit && t.explicit);
         let played = self.queue.replace(tracks, start, fill);
         if hidden {
-            self.toast(if played { "Skipped an explicit song" } else { "Nothing to play that isn't explicit" });
+            self.toast(if played { crate::tr!("status-explicit-skipped") } else { crate::tr!("status-no-clean-tracks") });
         }
         self.start_queue(played);
     }
@@ -154,7 +154,7 @@ impl App {
         let hidden = self.hide_explicit && !tracks.is_empty() && tracks.iter().all(|t| t.explicit);
         let played = self.queue.replace_shuffled(tracks, fill);
         if hidden {
-            self.toast("Nothing to play that isn't explicit");
+            self.toast(crate::tr!("status-no-clean-tracks"));
         }
         self.start_queue(played);
     }
@@ -230,7 +230,7 @@ impl App {
         self.request_art();
         self.show_in_media(&track);
         self.backend.request(Req::Lyrics(track.clone()));
-        self.toast(format!("Picked up \"{}\" from your other device. Press play to carry on.", track.title));
+        self.toast(crate::tr!("status-track-from-device", title = track.title.as_str()));
     }
 
     pub(super) fn session_json(&self) -> Option<String> {
@@ -265,7 +265,7 @@ impl App {
         log::warn!("playback interrupted at {at:?} ({reason}); giving up");
         self.hold_interrupted_track(at);
         let title = self.current().map(|t| t.title.clone()).unwrap_or_default();
-        self.toast(format!("Lost the connection while playing \"{title}\". Press play to pick up where it stopped."));
+        self.toast(crate::tr!("status-track-disconnected", title = title.as_str()));
     }
 
     pub(super) fn offer_backup_stream(&mut self, at: Duration) -> bool {
@@ -489,6 +489,7 @@ impl App {
     /// everyone hears the same song at the same moment.
     pub(super) fn sync_tempo(&self) {
         self.audio.set_speed(if self.jam.active() || !self.tempo_on { 1.0 } else { self.speed });
+        self.audio.set_keep_pitch(self.keep_pitch);
     }
 
     pub(crate) fn set_crossfade(&self) {
@@ -499,7 +500,7 @@ impl App {
     pub(super) fn explicit_hidden(&mut self, t: &Track) -> bool {
         let hidden = self.hide_explicit && t.explicit;
         if hidden {
-            self.toast("Skipped an explicit song");
+            self.toast(crate::tr!("status-explicit-skipped"));
         }
         hidden
     }
@@ -657,6 +658,7 @@ impl App {
     }
 
     pub(super) fn seek_to(&mut self, at: Duration) {
+        self.seek_wheel_seeked(at.as_secs_f32());
         if self.resume_at.is_some() {
             // Restored but not loaded yet (nothing for the player to seek): move the start point instead.
             self.resume_at = Some(at);
@@ -688,7 +690,7 @@ impl App {
     /// The Shuffle button: on, or off putting the queue back in order (see `Queue::toggle_shuffle`).
     pub(super) fn toggle_shuffle(&mut self) {
         if self.jam.guest() {
-            return self.toast("Only the host can shuffle the jam");
+            return self.toast(crate::tr!("jam-host-only-shuffle"));
         }
         self.queue.toggle_shuffle();
         // Waiting at the end for a playlist's next page, with songs after this one now.

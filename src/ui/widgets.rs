@@ -16,13 +16,25 @@ pub fn named(resp: Response, name: &str) -> Response {
 /// Single-line text truncated with an ellipsis to `width`. Right-to-left text is put in
 /// display order (`bidi`), and cut at its end (the left) when it doesn't fit.
 pub fn galley(ui: &Ui, text: &str, font: egui::FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+    galley_based(ui, text, font, color, width, None)
+}
+
+/// The interface's own text reads its language's way, whatever a sentence starts with.
+pub fn ui_base() -> Option<bool> {
+    crate::i18n::rtl().then_some(true)
+}
+
+/// [`galley`], read right to left or not as `base` says (`None`: by its first letter
+/// with a direction; see [`crate::bidi::job_based`]).
+pub fn galley_based(ui: &Ui, text: &str, font: egui::FontId, color: Color32, width: f32, base: Option<bool>) -> std::sync::Arc<egui::Galley> {
     let width = width.max(10.0);
+    let rtl = base.unwrap_or_else(|| crate::bidi::rtl_base(text));
     let mut job = if !crate::bidi::has_rtl(text) {
         egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color)
-    } else if crate::bidi::rtl_base(text) {
-        crate::bidi::job(&rtl_fit(ui, text, &font, width), font, color)
+    } else if rtl {
+        crate::bidi::job_based(&rtl_fit(ui, text, &font, width), font, color, Some(true))
     } else {
-        crate::bidi::job(text, font, color)
+        crate::bidi::job_based(text, font, color, Some(false))
     };
     job.wrap = egui::text::TextWrapping::truncate_at_width(width);
     ui.fonts_mut(|f| f.layout_job(job))
@@ -89,31 +101,95 @@ pub fn galley_wrapped(
     width: f32,
     rows: usize,
 ) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font.clone(), color, width.max(10.0));
-    job.wrap.max_rows = rows;
-    job.wrap.break_anywhere = false;
-    job.wrap.overflow_character = Some('…');
-    let g = ui.fonts_mut(|f| f.layout_job(job.clone()));
+    galley_wrapped_based(ui, text, font, color, width, rows, None)
+}
+
+/// [`galley_wrapped`], read right to left or not as `base` says (see [`galley_based`]).
+pub fn galley_wrapped_based(
+    ui: &Ui,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    width: f32,
+    rows: usize,
+    base: Option<bool>,
+) -> std::sync::Arc<egui::Galley> {
+    let width = width.max(10.0);
     if !crate::bidi::has_rtl(text) {
-        return g;
+        let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, width);
+        job.wrap.max_rows = rows;
+        job.wrap.break_anywhere = false;
+        job.wrap.overflow_character = Some('…');
+        return ui.fonts_mut(|f| f.layout_job(job));
     }
     // Wrapped in reading order, then each row put in display order on its own (ordering
-    // the whole text first would start the first row with the end of the sentence).
-    let mut rows_text = Vec::with_capacity(g.rows.len());
-    let mut chars = text.chars();
-    for (i, row) in g.rows.iter().enumerate() {
-        let mut s: String = chars.by_ref().take(row.char_count_including_newline().0).collect();
-        if s.ends_with('\n') {
-            s.pop();
+    // the whole text first would start the first row with the end of the sentence). The
+    // rows are worked out here by measuring: a shaped row's glyphs don't count its
+    // letters (لا is two letters in one glyph), so cutting the text by them split words.
+    let measure = |s: &str| ui.fonts_mut(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x);
+    let rows_text = wrap_rows(text, width, rows, measure);
+    let rtl = base.unwrap_or_else(|| crate::bidi::rtl_base(text));
+    ui.fonts_mut(|f| f.layout_job(crate::bidi::job_based(&rows_text.join("\n"), font, color, Some(rtl))))
+}
+
+/// `text` in rows no wider than `width` by `measure`, broken between words, at most
+/// `rows` of them, the last ending in "…" when there was more. A word wider than a row
+/// has one to itself.
+fn wrap_rows(text: &str, width: f32, rows: usize, measure: impl Fn(&str) -> f32) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut more = false;
+    'lines: for line in text.split('\n') {
+        let mut row = String::new();
+        for word in line.split(' ').filter(|w| !w.is_empty()) {
+            let joined = if row.is_empty() { word.to_owned() } else { format!("{row} {word}") };
+            if row.is_empty() || measure(&joined) <= width {
+                row = joined;
+                continue;
+            }
+            out.push(std::mem::replace(&mut row, word.to_owned()));
+            if out.len() == rows {
+                more = true;
+                break 'lines;
+            }
         }
-        if i + 1 == g.rows.len() && g.elided {
-            s = format!("{}…", s.trim_end());
+        out.push(row);
+        if out.len() == rows {
+            more = text.split('\n').count() > rows;
+            break;
         }
-        rows_text.push(s.trim_end().to_owned());
     }
-    let mut job = crate::bidi::job(&rows_text.join("\n"), font, color);
-    job.halign = g.job.halign;
-    ui.fonts_mut(|f| f.layout_job(job))
+    if more && let Some(last) = out.last_mut() {
+        let mut words: Vec<&str> = last.split(' ').collect();
+        while words.len() > 1 && measure(&format!("{}…", words.join(" "))) > width {
+            words.pop();
+        }
+        *last = format!("{}…", words.join(" "));
+    }
+    out
+}
+
+/// A paragraph of the interface's own text across the width there is, in display
+/// order when it has right-to-left letters, and from the right in a right-to-left
+/// language. (egui's label would lay its words out left to right.)
+pub fn note(ui: &mut Ui, text: &str, font: egui::FontId, color: Color32) -> Response {
+    if !crate::bidi::has_rtl(text) {
+        return ui.label(egui::RichText::new(text).font(font).color(color));
+    }
+    let w = ui.available_width();
+    let g = galley_wrapped_based(ui, text, font, color, w, usize::MAX, ui_base());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
+    let x = if crate::i18n::rtl() { rect.right() - g.size().x } else { rect.left() };
+    ui.painter().galley(pos2(x, rect.top()), g, color);
+    resp
+}
+
+/// The interface's own short text as a label's or a hint's, in display order (see
+/// [`note`]).
+pub fn ui_text(text: &str, font: egui::FontId, color: Color32) -> egui::WidgetText {
+    if !crate::bidi::has_rtl(text) {
+        return egui::RichText::new(text).font(font).color(color).into();
+    }
+    crate::bidi::job_based(text, font, color, ui_base()).into()
 }
 
 pub fn text_at(ui: &Ui, pos: Pos2, text: &str, font: egui::FontId, color: Color32, width: f32) -> Rect {
@@ -447,7 +523,7 @@ pub(super) fn unlike_pill(ui: &mut Ui, label: &str, wide: bool, target: egui::Id
 
 fn pill_button(ui: &mut Ui, label: &str, glyph: Option<char>, primary: bool, labelled: bool, unlike: Option<egui::Id>) -> (Response, bool) {
     // Laid out once; the colour is given when it's painted.
-    let text = ui.painter().layout_no_wrap(label.to_owned(), theme::semibold(14.0), Color32::PLACEHOLDER);
+    let text = galley(ui, label, theme::semibold(14.0), Color32::PLACEHOLDER, f32::INFINITY);
     let icon_w = if glyph.is_some() { 24.0 } else { 0.0 };
     let width = if labelled { text.size().x + icon_w + 36.0 } else { 38.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 38.0), Sense::click());
@@ -782,7 +858,8 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, pin: Option<bool>, a
         let prect = Rect::from_center_size(center, Vec2::splat(cl.play_px.max(32.0)));
         let p = ui.interact(prect, resp.id.with("play"), Sense::click());
         let playing = active == Some(true);
-        let p = named(p, &format!("{} {}", if playing { "Pause" } else { "Play" }, c.title)).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let label = if playing { crate::tr!("player-pause-item", title = c.title.as_str()) } else { crate::tr!("player-play-item", title = c.title.as_str()) };
+        let p = named(p, &label).on_hover_cursor(egui::CursorIcon::PointingHand);
         let ph = theme::anim_bool(ui.ctx(), p.id.with("h"), p.hovered(), 0.12);
         let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::unique("accent"))).unwrap_or(theme::RED);
         let rest_a = egui::lerp(cl.play_alpha..=cl.play_hover_alpha.unwrap_or(cl.play_alpha), ph) * h;
@@ -810,7 +887,7 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, pin: Option<bool>, a
     linked_text(ui, pos2(rect.left(), sub_y), &c.subtitle, &c.links, theme::regular(13.0), theme::with_alpha(theme::text_dim(), cl.subtitle_alpha), width - 36.0, acts);
     // On the subtitle line, whose width leaves room for it, so a two-line title never sits under it.
     let more_rect = Rect::from_center_size(pos2(rect.right() - 16.0, sub_y + 8.0), Vec2::splat(30.0));
-    let more = more_button(ui, more_rect, resp.id.with("more"), "Options");
+    let more = more_button(ui, more_rect, resp.id.with("more"), crate::tr!("ui-options"));
     let behavior = if matches!(c.target, Target::Song(_)) { egui::PopupCloseBehavior::CloseOnClickOutside } else { egui::PopupCloseBehavior::CloseOnClick };
     menu_popup(&more).close_behavior(behavior).show(|ui| card_menu_contents(ui, c, liked, pin, acts));
     // Right-click anywhere on the card opens the same menu, even on the play button,
@@ -877,33 +954,33 @@ pub fn card_menu_contents(ui: &mut Ui, c: &Card, liked: bool, pin: Option<bool>,
         Target::Song(t) => song_menu(ui, t, liked, None, acts),
         t => {
             menu_body(ui, crate::preset::active().app.menu_look.min_px);
-            if menu_action(ui, Some(icon::PLAY), "Play") {
+            if menu_action(ui, Some(icon::PLAY), crate::tr!("ui-play")) {
                 acts.push(Action::PlayCollection(t.clone(), false));
             }
-            if menu_action(ui, Some(icon::SHUFFLE), "Shuffle play") {
+            if menu_action(ui, Some(icon::SHUFFLE), crate::tr!("ui-shuffle-play")) {
                 acts.push(Action::PlayCollection(t.clone(), true));
             }
-            if menu_action(ui, None, "Open") {
+            if menu_action(ui, None, crate::tr!("settings-open")) {
                 acts.push(Action::Open(t.clone()));
             }
-            if matches!(t, Target::Album(_) | Target::Playlist(_)) && menu_action(ui, Some(icon::DOWNLOAD), "Download") {
+            if matches!(t, Target::Album(_) | Target::Playlist(_)) && menu_action(ui, Some(icon::DOWNLOAD), crate::tr!("settings-download")) {
                 acts.push(Action::DownloadMany(Some(t.clone()), c.title.clone(), None));
             }
             // Its songs aren't known here: shown when they went in its own folder.
             if let Target::Album(id) | Target::Playlist(id) = t
                 && crate::downloads::has_list_folder(id)
-                && menu_action(ui, Some(icon::FOLDER_OPEN), "Show in folder")
+                && menu_action(ui, Some(icon::FOLDER_OPEN), crate::tr!("widget-show-in-folder"))
             {
                 crate::downloads::show_list(id, &[]);
             }
             if let (Some(pinned), Target::Playlist(id)) = (pin, t)
-                && menu_action(ui, Some(if pinned { icon::PIN_OFF } else { icon::PIN }), if pinned { "Unpin playlist" } else { "Pin playlist" })
+                && menu_action(ui, Some(if pinned { icon::PIN_OFF } else { icon::PIN }), if pinned { crate::tr!("widget-unpin-playlist") } else { crate::tr!("widget-pin-playlist") })
             {
                 acts.push(Action::Pin(id.clone(), !pinned));
             }
             if super::actions::shareable(t) {
                 menu_divider(ui);
-                if menu_action(ui, None, "Copy link") {
+                if menu_action(ui, None, crate::tr!("ui-copy-link")) {
                     acts.push(Action::Share(t.clone()));
                 }
             }
@@ -1069,60 +1146,60 @@ pub fn song_menu(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, act
 
 /// The song menu's items, for menus that add their own (now playing's options).
 pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, acts: &mut Vec<Action>) {
-    if menu_row(ui, Some(icon::HEART), if liked { "Remove like" } else { "Like song" }, true, liked.then_some(t)) {
+    if menu_row(ui, Some(icon::HEART), if liked { crate::tr!("ui-unlike") } else { crate::tr!("ui-like-song") }, true, liked.then_some(t)) {
         acts.push(Action::Like(t.clone(), !liked));
     }
-    if menu_action(ui, Some(icon::THUMBS_DOWN), "Dislike song") {
+    if menu_action(ui, Some(icon::THUMBS_DOWN), crate::tr!("ui-dislike-song")) {
         acts.push(Action::Dislike(t.clone()));
     }
-    if menu_action(ui, Some(icon::LIST_PLUS), "Add to playlist") {
+    if menu_action(ui, Some(icon::LIST_PLUS), crate::tr!("ui-add-playlist")) {
         acts.push(Action::AddToPlaylist(vec![t.clone()]));
     }
     if let Some(i) = remove
-        && menu_action(ui, Some(icon::LIST_MINUS), "Remove from playlist")
+        && menu_action(ui, Some(icon::LIST_MINUS), crate::tr!("ui-remove-playlist"))
     {
         acts.push(Action::RemoveFromPlaylist(vec![i]));
     }
-    if menu_action(ui, None, "Copy link") {
+    if menu_action(ui, None, crate::tr!("ui-copy-link")) {
         acts.push(Action::Share(Target::Song(t.clone())));
     }
     match crate::downloads::path(&t.id) {
         Some(path) => {
-            if menu_action(ui, Some(icon::FOLDER_OPEN), "Show in folder") {
+            if menu_action(ui, Some(icon::FOLDER_OPEN), crate::tr!("widget-show-in-folder")) {
                 crate::downloads::show_file(&path);
             }
         }
         None => {
-            if menu_action(ui, Some(icon::DOWNLOAD), "Download") {
+            if menu_action(ui, Some(icon::DOWNLOAD), crate::tr!("settings-download")) {
                 acts.push(Action::Download(t.clone()));
             }
         }
     }
     menu_divider(ui);
-    if menu_action(ui, Some(icon::SKIP_FORWARD), "Play next") {
+    if menu_action(ui, Some(icon::SKIP_FORWARD), crate::tr!("player-play-next")) {
         acts.push(Action::PlayNext(t.clone()));
     }
-    if menu_action(ui, Some(icon::LIST_MUSIC), "Add to queue") {
+    if menu_action(ui, Some(icon::LIST_MUSIC), crate::tr!("ui-add-queue")) {
         acts.push(Action::Enqueue(t.clone()));
     }
-    if menu_action(ui, Some(icon::RADIO), "Start radio") {
+    if menu_action(ui, Some(icon::RADIO), crate::tr!("player-start-radio")) {
         acts.push(Action::Radio(t.clone()));
     }
     if t.album.as_ref().and_then(|a| a.id.as_ref()).is_some() || t.first_artist_id().is_some() {
         menu_divider(ui);
     }
     if let Some(id) = t.album.as_ref().and_then(|a| a.id.clone())
-        && menu_action(ui, Some(icon::DISC_3), "Go to album")
+        && menu_action(ui, Some(icon::DISC_3), crate::tr!("player-go-to-album"))
     {
         acts.push(Action::Open(Target::Album(id)));
     }
     if let Some(id) = t.first_artist_id()
-        && menu_action(ui, Some(icon::USER), "Go to artist") {
+        && menu_action(ui, Some(icon::USER), crate::tr!("player-go-to-artist")) {
             acts.push(Action::Open(Target::Artist(id.to_owned())));
         }
     if crate::ytm::upload_entity(&t.id).is_some() {
         menu_divider(ui);
-        if menu_action(ui, Some(icon::TRASH_2), "Delete upload") {
+        if menu_action(ui, Some(icon::TRASH_2), crate::tr!("dialog-delete-upload")) {
             acts.push(Action::DeleteUpload(t.clone()));
         }
     }
@@ -1404,7 +1481,7 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
             ui.painter().rect_filled(img, tr, theme::panel(1.0 - opacity));
         }
         if o.pick {
-            let play = named(ui.interact(img, base.id.with("cover"), Sense::click()), "Play").on_hover_text("Play").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let play = named(ui.interact(img, base.id.with("cover"), Sense::click()), crate::tr!("ui-play")).on_hover_text(crate::tr!("ui-play")).on_hover_cursor(egui::CursorIcon::PointingHand);
             if play.clicked() {
                 acts.push(Action::Play(vec![t.clone()], 0));
             }
@@ -1443,8 +1520,8 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         (false, _, _) => Some(t.artist_line()),
     };
     let sub = match (sub, &o.added_by) {
-        (Some(s), Some(by)) if !s.is_empty() => Some(format!("{s} \u{2022} Added by {by}")),
-        (_, Some(by)) => Some(format!("Added by {by}")),
+        (Some(s), Some(by)) if !s.is_empty() => Some(format!("{s} • {}", crate::tr!("player-added-by", name = by))),
+        (_, Some(by)) => Some(crate::tr!("player-added-by", name = by)),
         (sub, _) => sub,
     };
     let title_y = if sub.is_some() { cy - 18.0 } else { cy - 9.0 };
@@ -1475,9 +1552,9 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     }
     if let Some(rating) = rating {
         let label = match rating {
-            SongRating::Like => "Remove like",
-            SongRating::Dislike => "Remove dislike",
-            SongRating::Indifferent => "Like song",
+            SongRating::Like => crate::tr!("ui-unlike"),
+            SongRating::Dislike => crate::tr!("ui-remove-dislike"),
+            SongRating::Indifferent => crate::tr!("ui-like-song"),
         };
         let slot = Rect::from_center_size(pos2(text_right + rating_w / 2.0, cy), Vec2::splat(26.0));
         let button = named(ui.interact(slot, base.id.with(("rating", label)), Sense::click()), label)
@@ -1515,7 +1592,7 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     match o.queue_remove.filter(|_| base.contains_pointer()) {
         Some(i) => {
             let x = Rect::from_center_size(pos2(right - 14.0, cy), Vec2::splat(28.0));
-            let xr = named(ui.interact(x, base.id.with("rm"), Sense::click()), "Remove from queue").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let xr = named(ui.interact(x, base.id.with("rm"), Sense::click()), crate::tr!("ui-remove-queue")).on_hover_cursor(egui::CursorIcon::PointingHand);
             if xr.hovered() {
                 ui.painter().circle_filled(x.center(), 14.0, theme::glass(0.16));
             }
@@ -1535,7 +1612,7 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     let more_id = base.id.with("more");
     let open_id = more_id.with("open");
     if !rl.hover_menu || hovered || ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false)) {
-        let more = more_button(ui, more_rect, more_id, "Song options");
+        let more = more_button(ui, more_rect, more_id, crate::tr!("ui-song-options"));
         menu_popup(&more).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| song_menu(ui, t, o.liked, o.remove, acts));
         if rl.hover_menu {
             let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&more));
@@ -1552,16 +1629,71 @@ pub fn digits_at(ui: &Ui, right: Pos2, s: &str, font: egui::FontId, color: Color
     if !crate::preset::active().app.tabular_digits {
         return ui.painter().text(right, Align2::RIGHT_CENTER, s, font, color);
     }
-    let cell = ui.painter().layout_no_wrap("0".to_owned(), font.clone(), color).size();
-    let colon = ui.painter().layout_no_wrap(":".to_owned(), font.clone(), color).size().x;
-    let w: f32 = s.chars().map(|c| if c.is_ascii_digit() { cell.x } else { colon }).sum();
-    let mut x = right.x - w;
+    time_at(ui, right, Align2::RIGHT_CENTER, s, font, color)
+}
+
+/// `s` with every digit centred in a cell as wide as the widest digit, so a running time
+/// keeps its width and doesn't shuffle sideways each second (egui can't ask the font for
+/// its tabular figures). Everything else keeps its own width.
+pub fn time_galley(ui: &Ui, s: &str, font: egui::FontId, color: Color32) -> std::sync::Arc<egui::Galley> {
+    use egui::text::{LayoutJob, TextFormat};
+    // The exact advance, not the galley's rounded-out size.
+    let advance = |g: &egui::Galley| g.rows.first().map_or(0.0, |r| r.row.size.x);
+    let width_of = |c: char| advance(&ui.painter().layout_no_wrap(c.to_string(), font.clone(), color));
+    let widths: [f32; 10] = std::array::from_fn(|d| width_of(char::from(b'0' + d as u8)));
+    let cell = widths.iter().copied().fold(0.0, f32::max);
+    let format = TextFormat::simple(font.clone(), color);
+    let mut job = LayoutJob::default();
+    // The space each digit leaves after itself, given to whatever comes next.
+    let mut carry = 0.0;
+    // What the whole should measure: the same for every time of the same shape.
+    let mut target = 0.0;
+    let mut buf = [0u8; 4];
     for c in s.chars() {
-        let adv = if c.is_ascii_digit() { cell.x } else { colon };
-        ui.painter().text(pos2(x + adv / 2.0, right.y), Align2::CENTER_CENTER, c, font.clone(), color);
-        x += adv;
+        let pad = c.to_digit(10).map_or(0.0, |d| cell - widths[d as usize]);
+        target += if c.is_ascii_digit() { cell } else { width_of(c) };
+        job.append(c.encode_utf8(&mut buf), carry + pad / 2.0, format.clone());
+        carry = pad / 2.0;
     }
-    Rect::from_min_max(pos2(right.x - w, right.y - cell.y / 2.0), pos2(right.x, right.y + cell.y / 2.0))
+    // The last digit's trailing half, so the width doesn't hang on which digit ends it.
+    job.append("", carry, format);
+    let g = ui.fonts_mut(|f| f.layout_job(job.clone()));
+    // Glyph advances are snapped, so the sum can be a hair off: make it up at the end.
+    let off = target - advance(&g);
+    if off.abs() < 1e-3 {
+        return g;
+    }
+    if let Some(last) = job.sections.last_mut() {
+        last.leading_space = (last.leading_space + off).max(0.0);
+    }
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+/// A running time `g` painted at `at` that's a button too (on `hit`): a click swaps the
+/// song's length for the time left and back (`left`). Its own target, over the player
+/// bar's click for now playing; brighter while hovered or focused.
+pub fn time_toggle(ui: &Ui, hit: Rect, at: Pos2, g: std::sync::Arc<egui::Galley>, [rest, hover]: [Color32; 2], left: &mut bool) {
+    let name = if *left { tr!("player-time-show-length", time = g.text()) } else { tr!("player-time-show-left", time = g.text()) };
+    let resp = named(ui.interact(hit, ui.scope_id().with("time-toggle"), Sense::click()), &name).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        *left = !*left;
+    }
+    let ring = Rect::from_min_size(at, g.size()).expand(2.0);
+    focus_ring(ui, &resp, ring, 4.0);
+    // Themes without a focus ring still show where focus is, white text over video included.
+    if resp.has_focus() && crate::preset::active().app.controls.focus.is_none() {
+        ui.painter().rect_stroke(ring, 4.0, egui::Stroke::new(1.0, hover), egui::StrokeKind::Outside);
+    }
+    let lit = resp.hovered() || resp.has_focus();
+    ui.painter().galley_with_override_text_color(at, g, if lit { hover } else { rest });
+}
+
+/// [`time_galley`] painted with `align` at `pos`, as `Painter::text` would.
+pub fn time_at(ui: &Ui, pos: Pos2, align: Align2, s: &str, font: egui::FontId, color: Color32) -> Rect {
+    let g = time_galley(ui, s, font, color);
+    let rect = align.anchor_size(pos, g.size());
+    ui.painter().galley(rect.min, g, color);
+    rect
 }
 
 /// An 18 px tick box centred on `c`, white like a primary pill when ticked.
@@ -1597,8 +1729,8 @@ pub fn shelf_header(ui: &mut Ui, title: &str, strap: Option<&str>, strap_thumb: 
         if arrows {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let turn = crate::preset::active().app.controls.arrow_hover;
-                res.1 = icon_button_turning(ui, icon::CHEVRON_RIGHT, 18.0, &format!("Scroll {title} right"), false, turn).clicked();
-                res.0 = icon_button_turning(ui, icon::CHEVRON_LEFT, 18.0, &format!("Scroll {title} left"), false, turn).clicked();
+                res.1 = icon_button_turning(ui, icon::CHEVRON_RIGHT, 18.0, &crate::tr!("ui-scroll-right", title = title), false, turn).clicked();
+                res.0 = icon_button_turning(ui, icon::CHEVRON_LEFT, 18.0, &crate::tr!("ui-scroll-left", title = title), false, turn).clicked();
             });
         }
     });
@@ -1657,6 +1789,18 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
         ui.ctx().data_mut(|d| d.insert_temp(target_id, t));
     }
     let mut area = egui::ScrollArea::horizontal().id_salt(sid).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+    // A finger on the cards: the shelf's own drag would take an up-and-down swipe too
+    // and the page wouldn't move, so the drag is handled here instead, locked to the
+    // way it starts (the shelf sideways, the page up and down).
+    let rect_id = sid.with("rect");
+    if egui::scroll_area::DragScroll::OnTouch.enabled(ui.ctx()) {
+        use egui::scroll_area::{DragScroll, ScrollSource};
+        area = area.scroll_source(ScrollSource { drag: DragScroll::Never, ..ScrollSource::default() });
+        if let Some(rect) = ui.ctx().data(|d| d.get_temp::<Rect>(rect_id)) {
+            let resp = ui.interact(rect, sid.with("touch"), Sense::DRAG);
+            axis_locked_drag(ui, &resp, sid.with("axis"));
+        }
+    }
     if let Some(t) = target {
         let v = ui.ctx().animate_value_with_time(anim_id, t, 0.35 * theme::SPEED);
         area = area.horizontal_scroll_offset(v);
@@ -1670,8 +1814,56 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
         ui.set_min_width(content_width);
         add(ui)
     }).inner);
-    ui.ctx().data_mut(|d| d.insert_temp(viewport_id, out.inner_rect.width()));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(viewport_id, out.inner_rect.width());
+        d.insert_temp(rect_id, out.inner_rect);
+    });
     (out.inner, reached_end)
+}
+
+/// A drag that, once it has gone a few points, scrolls only the way it started for the
+/// rest of it (sideways or up and down), as phones and browsers do with a scroller inside
+/// a page; let go, and it coasts on. The scroll goes to the nearest scroll area that
+/// scrolls that way.
+fn axis_locked_drag(ui: &Ui, resp: &Response, state_id: egui::Id) {
+    use egui::style::ScrollAnimation;
+    /// How far a drag goes before its direction counts, points.
+    const LOCK: f32 = 6.0;
+    /// How much of the speed at letting go it coasts on: points per point/second.
+    const COAST: f32 = 0.3;
+    let (mut moved, mut axis): (Vec2, Option<usize>) = ui.ctx().data(|d| d.get_temp(state_id)).unwrap_or((Vec2::ZERO, None));
+    if resp.drag_started() {
+        (moved, axis) = (Vec2::ZERO, None);
+    }
+    if resp.dragged() {
+        let delta = ui.input(|i| i.pointer.delta());
+        moved += delta;
+        let step = match axis {
+            Some(_) => delta,
+            // Locked now: what it went before counts too.
+            None if moved.length() >= LOCK => {
+                axis = Some(usize::from(moved.y.abs() >= moved.x.abs()));
+                moved
+            }
+            None => Vec2::ZERO,
+        };
+        if let Some(a) = axis {
+            let mut v = Vec2::ZERO;
+            v[a] = step[a];
+            ui.scroll_with_delta_animation(v, ScrollAnimation::none());
+        }
+    }
+    if resp.drag_stopped() {
+        if let Some(a) = axis {
+            let mut v = Vec2::ZERO;
+            v[a] = (ui.input(|i| i.pointer.velocity())[a] * COAST).clamp(-2000.0, 2000.0);
+            if v[a].abs() > 1.0 {
+                ui.scroll_with_delta_animation(v, ScrollAnimation::duration(0.6));
+            }
+        }
+        (moved, axis) = (Vec2::ZERO, None);
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(state_id, (moved, axis)));
 }
 
 /// The skeleton's light band sweeping across `r`, for anything still loading.
@@ -1887,5 +2079,147 @@ mod shelf_scroll_tests {
         assert_eq!(shelf_page_starts(1, 3), [0]);
         // The old last page is between new page starts after more picks arrive.
         assert_eq!(shelf_page_target(&shelf_page_starts(11, 3), 436.0, 2.0 * 436.0, 1), 3.0 * 436.0);
+    }
+}
+
+#[cfg(test)]
+mod shelf_touch_tests {
+    use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect, TouchDeviceId, TouchId, TouchPhase, pos2, vec2};
+
+    /// A page that scrolls up and down with a shelf of cards in it, under a finger.
+    struct Page {
+        ctx: egui::Context,
+        time: f64,
+        /// The first card, as last drawn.
+        card: Rect,
+    }
+
+    impl Page {
+        fn new() -> Self {
+            let mut p = Self { ctx: egui::Context::default(), time: 0.0, card: Rect::NOTHING };
+            // A touch elsewhere first, so the page knows there's a touch screen.
+            p.frame(vec![touch(TouchPhase::Start, pos2(700.0, 550.0)), touch(TouchPhase::End, pos2(700.0, 550.0))]);
+            p.frame(vec![]);
+            p.frame(vec![]);
+            p
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), time: Some(self.time), predicted_dt: 1.0 / 60.0, events, ..Default::default() };
+            self.time += 1.0 / 60.0;
+            let ctx = self.ctx.clone();
+            let mut card = Rect::NOTHING;
+            let mut out = ctx.run_ui(raw, |ui| {
+                egui::ScrollArea::vertical().id_salt("page").auto_shrink(false).show(ui, |ui| {
+                    ui.add_space(100.0);
+                    super::h_scroll(ui, "touch-test", 0, 20, 150.0, 10.0, |ui| {
+                        for i in 0..20 {
+                            let (r, _) = ui.allocate_exact_size(vec2(150.0, 150.0), egui::Sense::click());
+                            if i == 0 {
+                                card = r;
+                            }
+                        }
+                    });
+                    ui.add_space(2000.0);
+                });
+            });
+            out.textures_delta.clear();
+            self.card = card;
+        }
+
+        /// A finger from `from` by `by`, in steps, lifted at the end; returns where the
+        /// first card moved by while the finger was down.
+        fn swipe(&mut self, from: Pos2, by: egui::Vec2) -> egui::Vec2 {
+            let start = self.card.min;
+            let press = |down| Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: down, modifiers: Modifiers::NONE };
+            self.frame(vec![touch(TouchPhase::Start, from), Event::PointerMoved(from), press(true)]);
+            let mut at = from;
+            for _ in 0..10 {
+                at += by / 10.0;
+                self.frame(vec![touch(TouchPhase::Move, at), Event::PointerMoved(at)]);
+            }
+            let moved = self.card.min - start;
+            self.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }, touch(TouchPhase::End, at), Event::PointerGone]);
+            moved
+        }
+    }
+
+    fn touch(phase: TouchPhase, pos: Pos2) -> Event {
+        Event::Touch { device_id: TouchDeviceId(1), id: TouchId(1), phase, pos, force: None }
+    }
+
+    #[test]
+    fn swiping_up_on_the_cards_scrolls_the_page() {
+        let mut p = Page::new();
+        let moved = p.swipe(pos2(300.0, 200.0), vec2(4.0, -150.0));
+        assert!(moved.y < -100.0, "the page didn't scroll: {moved:?}");
+        assert_eq!(moved.x, 0.0, "the shelf moved: {moved:?}");
+    }
+
+    #[test]
+    fn swiping_sideways_on_the_cards_scrolls_the_shelf() {
+        let mut p = Page::new();
+        let moved = p.swipe(pos2(400.0, 200.0), vec2(-150.0, 4.0));
+        assert!(moved.x < -100.0, "the shelf didn't scroll: {moved:?}");
+        assert_eq!(moved.y, 0.0, "the page moved: {moved:?}");
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::wrap_rows;
+
+    /// A letter a point: a word's width is its letter count.
+    fn width(s: &str) -> f32 {
+        s.chars().count() as f32
+    }
+
+    #[test]
+    fn rows_break_between_whole_words() {
+        // لأغنية has a two-letter ligature; a row's text is still whole words.
+        let text = "يُطبَّق بدءاً من الأغنية التالية";
+        let rows = wrap_rows(text, 14.0, 9, width);
+        assert_eq!(rows, ["يُطبَّق بدءاً", "من الأغنية", "التالية"]);
+        assert!(rows.iter().all(|r| width(r) <= 14.0));
+        assert_eq!(rows.join(" "), text);
+    }
+
+    #[test]
+    fn too_many_rows_end_in_an_ellipsis() {
+        assert_eq!(wrap_rows("one two three four five", 9.0, 2, width), ["one two", "three…"]);
+        assert_eq!(wrap_rows("a\nb\nc", 9.0, 2, width), ["a", "b…"]);
+        assert_eq!(wrap_rows("a\nb", 9.0, 2, width), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_long_word_has_a_row_to_itself() {
+        assert_eq!(wrap_rows("hi extraordinarily so", 5.0, 9, width), ["hi", "extraordinarily", "so"]);
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    #[test]
+    fn running_times_keep_their_width() {
+        let ctx = egui::Context::default();
+        // Inter, the app's own font, whose figures are proportional unless asked otherwise.
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert("inter".into(), std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../assets/fonts/Inter-Regular.ttf"))));
+        fonts.families.insert(egui::FontFamily::Proportional, vec!["inter".into()]);
+        ctx.set_fonts(fonts);
+        // Nothing paints these frames: their texture uploads are let go on purpose.
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = egui::FontId::proportional(13.0);
+            let width = |s: &str| super::time_galley(ui, s, font.clone(), egui::Color32::WHITE).rows[0].row.size.x;
+            // Inter's 1 is narrower than its 0, so these differ as plain text.
+            let plain = |s: &str| ui.painter().layout_no_wrap(s.to_owned(), font.clone(), egui::Color32::WHITE).size().x;
+            assert!((plain("1:11") - plain("0:00")).abs() > 0.5);
+            for s in ["1:11", "0:00", "2:47", "9:58", "4:44 / 3:21"] {
+                let base = if s.len() > 4 { width("0:00 / 0:00") } else { width("0:00") };
+                assert!((width(s) - base).abs() < 0.01, "{s}: {} vs {base}", width(s));
+            }
+        });
+        out.textures_delta.clear();
     }
 }

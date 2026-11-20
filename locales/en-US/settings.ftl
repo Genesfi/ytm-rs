@@ -113,8 +113,10 @@ settings-0-db = 0 dB
 ## Playback speed
 
 settings-playback-speed = Playback speed
-settings-playback-speed-desc = Play songs faster or slower, also from a button in the player bar. Faster sounds higher and slower lower, like a record. Lyrics stay in time. Back to 1× each time ytm-rs starts.
+settings-playback-speed-desc = Play songs faster or slower, also from a button in the player bar. Lyrics stay in time. Back to 1× each time ytm-rs starts.
 settings-speed = Speed
+settings-keep-pitch = Keep the pitch
+settings-keep-pitch-desc = Faster or slower without sounding higher or lower. Off, the pitch changes with the speed, like a record.
 settings-playback-speed-jam-note = Back to normal while you're in a jam, so everyone hears the same song.
 
 ## Music videos
@@ -289,6 +291,11 @@ settings-change = Change
 settings-open = Open
 settings-folder-per-list = Put albums and playlists in their own folder
 settings-folder-per-list-desc = Downloading an album or playlist from its page or menu saves its songs in a folder named after it. Songs downloaded already stay where they are.
+settings-file-lyrics = Lyrics in the file
+settings-file-lyrics-desc = Downloaded songs carry the lyrics you see for them, for other music players. Timed lyrics are saved as LRC.
+settings-file-lyrics-synced = Timed
+settings-file-lyrics-plain = Words only
+settings-file-lyrics-off = None
 
 ## Network
 
