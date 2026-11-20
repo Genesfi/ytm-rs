@@ -250,12 +250,12 @@ impl Client {
         }
     }
 
-    /// Every source's lyrics for a song: the Better Lyrics stream, Unison, and NetEase together.
+    /// Every source's lyrics for a song: the Better Lyrics stream, Unison, NetEase, and LRCLIB together.
     pub async fn fetch(&self, q: &Query<'_>) -> anyhow::Result<LyricsSet> {
         if let Some((_, l)) = self.recent.lock().unwrap().iter().find(|(id, _)| id == q.video_id) {
             return Ok(l.clone());
         }
-        let (stream, unison, netease) = tokio::join!(self.fetch_stream(q), self.fetch_unison(q), self.fetch_netease(q));
+        let (stream, unison, netease, lrclib) = tokio::join!(self.fetch_stream(q), self.fetch_unison(q), self.fetch_netease(q), self.fetch_lrclib(q));
         let mut sources = Vec::new();
         match stream {
             Ok(s) => sources.extend(s),
@@ -268,6 +268,10 @@ impl Client {
         match netease {
             Ok(s) => sources.extend(s),
             Err(e) => log::info!("netease: {e:#}"),
+        }
+        match lrclib {
+            Ok(s) => sources.extend(s),
+            Err(e) => log::info!("lrclib: {e:#}"),
         }
         if sources.is_empty() {
             return Ok(LyricsSet::default());
@@ -312,38 +316,63 @@ impl Client {
     }
 
     async fn fetch_unison(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
-        let mut params = vec![("v", q.video_id.to_owned()), ("song", q.song.to_owned()), ("artist", q.artist.to_owned())];
-        params.push(("duration", q.duration.unwrap_or(0).to_string()));
-        if let Some(a) = q.album {
-            params.push(("album", a.to_owned()));
+        let title_parts = clean_title(q.song);
+        let mut titles = vec![q.song.to_owned()];
+        if title_parts.core != q.song && !title_parts.core.is_empty() {
+            titles.push(title_parts.core.clone());
         }
-        let resp = self.http.get(UNISON_API).query(&params).timeout(Duration::from_secs(10)).send().await?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(vec![]);
+        if let Some(ref alt) = title_parts.alt {
+            titles.push(alt.clone());
         }
-        let v: Value = resp.error_for_status()?.json().await?;
-        Ok(from_unison(&v["data"], q.duration.unwrap_or(0) as i32 * 1000))
+        titles.dedup();
+
+        for song_title in titles {
+            let mut params = vec![("v", q.video_id.to_owned()), ("song", song_title), ("artist", q.artist.to_owned())];
+            params.push(("duration", q.duration.unwrap_or(0).to_string()));
+            if let Some(a) = q.album {
+                params.push(("album", a.to_owned()));
+            }
+            let Ok(resp) = self.http.get(UNISON_API).query(&params).timeout(Duration::from_secs(8)).send().await else { continue };
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                continue;
+            }
+            let Ok(v) = resp.error_for_status()?.json::<Value>().await else { continue };
+            let list = from_unison(&v["data"], q.duration.unwrap_or(0) as i32 * 1000);
+            if !list.is_empty() {
+                return Ok(list);
+            }
+        }
+        Ok(vec![])
     }
 
     async fn fetch_netease(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
-        let clean_title = clean_netease_query(q.song);
-        let clean_artist = clean_netease_query(q.artist.split(['/', ',', '&']).next().unwrap_or(q.artist));
-        if clean_title.is_empty() {
+        let title_parts = clean_title(q.song);
+        let clean_artist = clean_noise(&strip_brackets(q.artist.split(['/', ',', '&']).next().unwrap_or(q.artist)));
+        if title_parts.core.is_empty() && title_parts.full.is_empty() {
             return Ok(vec![]);
         }
         let target_ms = q.duration.unwrap_or(0) as i64 * 1000;
         let mut queries: Vec<String> = Vec::new();
         if !clean_artist.is_empty() {
-            queries.push(format!("{clean_title} {clean_artist}"));
-            if q.song.trim() != clean_title {
-                queries.push(format!("{} {clean_artist}", q.song.trim()));
+            queries.push(format!("{} {clean_artist}", title_parts.core));
+            if let Some(ref alt) = title_parts.alt {
+                queries.push(format!("{alt} {clean_artist}"));
+            }
+            if q.song.trim() != title_parts.core {
+                queries.push(format!("{} {clean_artist}", title_parts.full));
             }
         }
-        queries.push(clean_title.clone());
+        queries.push(title_parts.core.clone());
+        if let Some(ref alt) = title_parts.alt {
+            queries.push(alt.clone());
+        }
+        queries.push(title_parts.full.clone());
         queries.dedup();
 
-        let t_low = clean_title.to_lowercase();
+        let c_low = title_parts.core.to_lowercase();
         let a_low = clean_artist.to_lowercase();
+        let alt_low = title_parts.alt.as_ref().map(|s| s.to_lowercase());
+        let full_low = title_parts.full.to_lowercase();
         let mut ranked: Vec<(f32, i64)> = Vec::new();
         let mut seen_ids: Vec<i64> = Vec::new();
 
@@ -371,7 +400,7 @@ impl Client {
                 }
                 seen_ids.push(id);
                 let name = s["name"].as_str().unwrap_or("").to_lowercase();
-                let clean_name = clean_netease_query(&name).to_lowercase();
+                let clean_name = clean_noise(&strip_brackets(&name)).to_lowercase();
                 let dur = s["duration"].as_i64().unwrap_or(0);
                 let artist_match = s["artists"]
                     .as_array()
@@ -384,10 +413,18 @@ impl Client {
                             })
                     })
                     .unwrap_or(false);
+
+                let is_title_match = name == c_low || clean_name == c_low
+                    || alt_low.as_ref().is_some_and(|a| name == *a || clean_name == *a)
+                    || name == full_low || clean_name == full_low;
+                let is_title_contain = name.contains(&c_low) || c_low.contains(&clean_name)
+                    || alt_low.as_ref().is_some_and(|a| name.contains(a) || a.contains(&clean_name))
+                    || name.contains(&full_low) || full_low.contains(&clean_name);
+
                 let mut score = 0.0f32;
-                if name == t_low || clean_name == t_low {
+                if is_title_match {
                     score += 60.0;
-                } else if name.contains(&t_low) || t_low.contains(&clean_name) && clean_name.chars().count() >= 2 {
+                } else if is_title_contain && clean_name.chars().count() >= 2 {
                     score += 35.0;
                 } else {
                     // Reject unrelated song titles
@@ -470,6 +507,80 @@ impl Client {
         Ok(found)
     }
 
+    async fn fetch_lrclib(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
+        let title_parts = clean_title(q.song);
+        let clean_artist = clean_noise(&strip_brackets(q.artist.split(['/', ',', '&']).next().unwrap_or(q.artist)));
+        let mut titles = vec![title_parts.core.clone()];
+        if let Some(ref alt) = title_parts.alt {
+            titles.push(alt.clone());
+        }
+        if title_parts.full != title_parts.core && !title_parts.full.is_empty() {
+            titles.push(title_parts.full.clone());
+        }
+        titles.dedup();
+
+        let song_ms = q.duration.unwrap_or(0) as i32 * 1000;
+        let target_s = q.duration.unwrap_or(0) as f32;
+
+        for t in titles {
+            if t.trim().is_empty() {
+                continue;
+            }
+            let mut params = vec![("track_name", t.as_str())];
+            if !clean_artist.is_empty() {
+                params.push(("artist_name", clean_artist.as_str()));
+            }
+            let resp = match self
+                .http
+                .get("https://lrclib.net/api/search")
+                .query(&params)
+                .header("User-Agent", "ytm-rs/0.3.4 (https://github.com/grapedjuice/ytm-rs)")
+                .timeout(Duration::from_secs(6))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => r,
+                _ => continue,
+            };
+
+            let Ok(items) = resp.json::<Vec<Value>>().await else { continue };
+            let mut synced_cand = None;
+            let mut plain_cand = None;
+
+            for item in items {
+                let dur = item["duration"].as_f64().unwrap_or(0.0) as f32;
+                if target_s > 10.0 && dur > 10.0 && (dur - target_s).abs() > 30.0 {
+                    continue;
+                }
+                if let Some(synced) = item["syncedLyrics"].as_str().filter(|s| !s.trim().is_empty()) {
+                    let mut lines = parse_lrc(synced, song_ms);
+                    lrc_fixers(&mut lines);
+                    if derive_sync(&lines) != Sync::None {
+                        if let Some(lyrics) = Lyrics::new(Provider::LrclibSynced, lines, None, vec![]) {
+                            synced_cand = Some(lyrics);
+                            break;
+                        }
+                    }
+                } else if plain_cand.is_none() {
+                    if let Some(plain) = item["plainLyrics"].as_str().filter(|s| !s.trim().is_empty()) {
+                        let lines = parse_plain(plain);
+                        if let Some(lyrics) = Lyrics::new(Provider::LrclibPlain, lines, None, vec![]) {
+                            plain_cand = Some(lyrics);
+                        }
+                    }
+                }
+            }
+
+            if let Some(synced) = synced_cand {
+                return Ok(vec![synced]);
+            }
+            if let Some(plain) = plain_cand {
+                return Ok(vec![plain]);
+            }
+        }
+        Ok(vec![])
+    }
+
     /// A valid JWT, from cache or by running the Turnstile challenge.
     async fn token(&self, force_new: bool) -> anyhow::Result<String> {
         let mut slot = self.jwt.lock().await;
@@ -505,34 +616,100 @@ impl Client {
     }
 }
 
-fn clean_netease_query(raw: &str) -> String {
-    let mut out = String::new();
+#[derive(Debug, Clone)]
+pub struct CleanTitle {
+    pub core: String,
+    pub alt: Option<String>,
+    pub full: String,
+}
+
+pub fn strip_brackets(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
     let mut depth = 0i32;
-    for ch in raw.chars() {
+    for ch in s.chars() {
         match ch {
-            '(' | '[' | '（' | '【' | '『' | '「' => depth += 1,
-            ')' | ']' | '）' | '】' | '』' | '」' => depth = (depth - 1).max(0),
+            '(' | '[' | '{' | '（' | '【' | '『' | '「' | '〔' | '〈' | '《' => depth += 1,
+            ')' | ']' | '}' | '）' | '】' | '』' | '」' | '〕' | '〉' | '》' => depth = (depth - 1).max(0),
             _ if depth == 0 => out.push(ch),
             _ => {}
         }
     }
-    let trimmed = out
-        .split(" - ")
-        .next()
-        .unwrap_or(&out)
-        .split(" / ")
-        .next()
-        .unwrap_or(&out)
-        .split(" | ")
-        .next()
-        .unwrap_or(&out)
-        .trim_matches(|c: char| c == '.' || c == '…' || c == '-' || c.is_whitespace());
-    let cleaned = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.is_empty() {
-        raw.trim().to_owned()
-    } else {
-        cleaned
+    out
+}
+
+pub fn clean_noise(s: &str) -> String {
+    let mut out = s.to_string();
+    let noise_words = [
+        "official music video", "official lyric video", "official audio", "official video", "music video",
+        "lyric video", "full audio", "audio video", "official", "theme song", "soundtrack",
+        "original soundtrack", "ver.", "cover", "covered by", "theme", "audio", "mv",
+    ];
+    for w in noise_words {
+        let lower = out.to_lowercase();
+        if let Some(pos) = lower.find(w) {
+            if out.is_char_boundary(pos) {
+                if let Some(open) = out[..pos].rfind(|c| c == '(' || c == '[' || c == '（' || c == '【' || c == '-' || c == '—' || c == '|' || c == '｜') {
+                    out.truncate(open);
+                } else if pos > 0 {
+                    let prev = out[..pos].chars().last().unwrap_or(' ');
+                    if prev.is_whitespace() || prev == '/' || prev == '|' || prev == '-' {
+                        out.truncate(pos);
+                    }
+                }
+            }
+        }
     }
+    let prefixes = ["ost ", "ost: ", "ep ", "ep: ", "album ", "single "];
+    for p in prefixes {
+        if out.to_lowercase().starts_with(p) {
+            out = out[p.len()..].to_string();
+        }
+    }
+    if let Some(stripped) = out.strip_suffix(" EP").or_else(|| out.strip_suffix(" ep")) {
+        out = stripped.to_string();
+    }
+    if let Some(stripped) = out.strip_suffix(" OST").or_else(|| out.strip_suffix(" ost")) {
+        out = stripped.to_string();
+    }
+    out.trim_matches(|c: char| c == '.' || c == '…' || c == '-' || c == '—' || c == '/' || c == '|' || c == '｜' || c.is_whitespace())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn clean_title(raw: &str) -> CleanTitle {
+    let bracketless = strip_brackets(raw);
+    let without_pipe = bracketless.split(" | ").next().unwrap_or(&bracketless).split('｜').next().unwrap_or(&bracketless);
+    let full = clean_noise(without_pipe);
+    let full = if full.is_empty() { clean_noise(raw) } else { full };
+
+    let mut core = full.clone();
+    let mut alt = None;
+
+    if let Some((l, r)) = full.split_once(" - ").or_else(|| full.split_once(" — ")) {
+        let l_low = l.trim().to_lowercase();
+        let is_ep_or_ost = l_low.ends_with(" ep") || l_low.ends_with(" ost") || l_low == "ep" || l_low == "ost";
+        let left = clean_noise(l);
+        let right = clean_noise(r);
+        if !left.is_empty() && !right.is_empty() {
+            if is_ep_or_ost {
+                core = right;
+                alt = Some(left);
+            } else {
+                core = left;
+                alt = Some(right);
+            }
+        }
+    } else if let Some((l, r)) = full.split_once(" / ").or_else(|| full.split_once('／')) {
+        let left = clean_noise(l);
+        let right = clean_noise(r);
+        if !left.is_empty() && !right.is_empty() {
+            core = left;
+            alt = Some(right);
+        }
+    }
+
+    CleanTitle { core, alt, full }
 }
 
 /// Parses NetEase word-by-word karaoke (`yrc.lyric`):
@@ -1691,6 +1868,24 @@ mod tests {
         assert_eq!(ttml_time("12.5s"), 12500);
         assert_eq!(ttml_time("250ms"), 250);
         assert_eq!(ttml_time("01:00:01.000"), 3_601_000);
+    }
+
+    #[test]
+    fn clean_title_handles_brackets_noise_and_alt_titles() {
+        let t1 = clean_title("《Arknights》OST [ Тысячу лет спустя ] Toska | Время, вперед Theme");
+        assert_eq!(t1.core, "Toska");
+
+        let t2 = clean_title("Тоска EP - Тысячу лет спустя | Arknights");
+        assert_eq!(t2.core, "Тысячу лет спустя");
+        assert_eq!(t2.alt.as_deref(), Some("Тоска"));
+
+        let t3 = clean_title("Whiteness");
+        assert_eq!(t3.core, "Whiteness");
+        assert!(t3.alt.is_none());
+
+        let t4 = clean_title("ソラニン / ASIAN KUNG-FU GENERATION (cover)");
+        assert_eq!(t4.core, "ソラニン");
+        assert_eq!(t4.alt.as_deref(), Some("ASIAN KUNG-FU GENERATION"));
     }
 
     #[test]
