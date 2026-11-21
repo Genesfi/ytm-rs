@@ -358,7 +358,8 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     {
         let ui = &mut head;
         ui.spacing_mut().item_spacing.x = 0.0;
-        ui.add_space(4.0);
+        let menu_x = lerp(4.0..=(row_w - 40.0) / 2.0, t);
+        ui.add_space(menu_x.max(0.0));
         menu_button(app, ui);
         ui.add_space(8.0);
         ui.multiply_opacity(a);
@@ -411,7 +412,14 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         // On the rail with labels: the icon over a small one-line label.
         let under = item.rail_labels && t > 0.5;
         let icon_y = if under { rect.center().y - 9.0 } else { rect.center().y };
-        icon_at(ui, pos2(if under { rect.center().x } else { rect.left() + ICON_X + slid }, icon_y), glyph, 19.0, icon_fg);
+        let icon_x = if under {
+            rect.center().x
+        } else {
+            let expanded_x = rect.left() + ICON_X + slid;
+            let rail_x = rect.center().x;
+            lerp(expanded_x..=rail_x, t)
+        };
+        icon_at(ui, pos2(icon_x, icon_y), glyph, 19.0, icon_fg);
         if under {
             let short = label.split_whitespace().next().unwrap_or(label);
             ui.painter().text(pos2(rect.center().x, rect.center().y + 14.0), Align2::CENTER_CENTER, short, theme::regular(10.5), icon_fg);

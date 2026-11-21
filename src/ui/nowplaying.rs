@@ -1446,12 +1446,11 @@ fn song_video_switch(app: &mut App, ui: &mut Ui, header: Rect) {
     let corner_x = if look.at_right { ui.max_rect().right() - 170.0 } else { ui.max_rect().left() };
     let header = if look.at_corner { Rect::from_min_size(pos2(corner_x, ui.max_rect().bottom() - header.height()), vec2(170.0, header.height())) } else { header };
     let header = header.translate(vec2(0.0, look.y_offset_full.filter(|_| app.fullscreen).unwrap_or(look.y_offset)));
-    let rect = Rect::from_center_size(header.center(), vec2(170.0, header.height()));
-    let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    row.spacing_mut().item_spacing.x = 6.0;
+    let picked = app.video_picked();
+    let back = Rect::from_center_size(header.center(), vec2(150.0, 36.0));
+    let radius = look.radius.unwrap_or(18.0);
+
     if look.back.is_some() || look.stroke > 0.0 {
-        let back = Rect::from_center_size(header.center(), vec2(150.0, 42.0));
-        let radius = look.radius.unwrap_or(21.0);
         if let Some(g) = app.look().app.glass.switch {
             crate::shader::frost(ui.painter(), back, crate::shader::Frost { look: g, radius, opacity: 1.0, fade: 0.0 });
         }
@@ -1464,28 +1463,42 @@ fn song_video_switch(app: &mut App, ui: &mut Ui, header: Rect) {
             ui.painter().rect_stroke(back, radius, egui::Stroke::new(1.0, theme::with_alpha(Color32::WHITE, look.stroke)), egui::StrokeKind::Inside);
         }
     }
-    let picked = app.video_picked();
+
+    // Two segments inside `back`: Song (left) and Video (right)
+    let half_w = (back.width() - 6.0) / 2.0;
+    let seg_h = back.height() - 6.0;
+    let song_rect = Rect::from_min_size(pos2(back.left() + 3.0, back.top() + 3.0), vec2(half_w, seg_h));
+    let video_rect = Rect::from_min_size(pos2(back.right() - 3.0 - half_w, back.top() + 3.0), vec2(half_w, seg_h));
+
+    let active_rect = if picked { video_rect } else { song_rect };
+    let seg_radius = (radius - 3.0).max(4.0);
+
     if let Some(a) = look.selected {
-        let cell = Rect::from_center_size(header.center() + vec2(if picked { 34.0 } else { -36.0 }, 0.0), vec2(68.0, 34.0));
-        ui.painter().rect_filled(cell, look.radius.unwrap_or(17.0), theme::with_alpha(Color32::WHITE, a));
-    }
-    let (song, video) = if look.plain {
-        // Plain words in the same places as the selected fill above.
-        let word = |ui: &mut Ui, label: &str, x: f32, on: bool| {
-            let r = Rect::from_center_size(header.center() + vec2(x, 0.0), vec2(68.0, 34.0));
-            let resp = named(ui.interact(r, ui.scope_id().with(("av", label)), Sense::click()), label).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let c = if on || resp.hovered() { Color32::WHITE } else { theme::text_dim() };
-            if !super::vector::paint(ui, &label.to_lowercase(), r.center(), 18.0, c) {
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, label, theme::semibold(13.5), c);
-            }
-            widgets::focus_ring(ui, &resp, r, look.radius.unwrap_or(17.0));
-            resp.clicked()
-        };
-        (word(ui, crate::tr!("ui-song"), -36.0, !picked), word(ui, crate::tr!("ui-video"), 34.0, picked))
+        ui.painter().rect_filled(active_rect, seg_radius, theme::with_alpha(Color32::WHITE, a));
     } else {
-        (widgets::chip(&mut row, crate::tr!("ui-song"), !picked).clicked(), widgets::chip(&mut row, crate::tr!("ui-video"), picked).clicked())
+        ui.painter().rect_filled(active_rect, seg_radius, Color32::WHITE);
+    }
+
+    let draw_segment = |ui: &mut Ui, r: Rect, label: &str, on: bool| -> bool {
+        let resp = named(ui.interact(r, ui.scope_id().with(("av", label)), Sense::click()), label).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let text_color = if on {
+            Color32::BLACK
+        } else if resp.hovered() {
+            Color32::WHITE
+        } else {
+            theme::text_dim()
+        };
+        if !super::vector::paint(ui, &label.to_lowercase(), r.center(), 18.0, text_color) {
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, label, theme::semibold(13.5), text_color);
+        }
+        widgets::focus_ring(ui, &resp, r, seg_radius);
+        resp.clicked()
     };
-    if (song && picked) || (video && !picked) {
+
+    let song_clicked = draw_segment(ui, song_rect, &crate::tr!("ui-song"), !picked);
+    let video_clicked = draw_segment(ui, video_rect, &crate::tr!("ui-video"), picked);
+
+    if (song_clicked && picked) || (video_clicked && !picked) {
         let on_song = app.current().is_some_and(|t| !t.has_video());
         app.actions.push(if on_song { Action::SongVideo(!picked) } else { Action::ToggleVideo });
     }
