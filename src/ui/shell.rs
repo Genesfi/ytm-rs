@@ -638,7 +638,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
 /// Round button with a clockwise arrow, drawn like the icon font's (Lucide's rotate-cw),
 /// which the bundled subset doesn't have.
 fn refresh_button(ui: &mut Ui) -> egui::Response {
-    refresh_button_with(ui, 18.0, "Refresh", "Refresh (F5)")
+    refresh_button_with(ui, 18.0, &crate::tr!("nav-refresh"), &crate::tr!("nav-refresh-shortcut"))
 }
 
 /// Same clockwise-arrow reload button, sized and labelled by the caller.

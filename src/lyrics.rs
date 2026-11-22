@@ -102,11 +102,11 @@ impl Provider {
             Provider::BLyricsRich | Provider::BLyricsSynced => "Better Lyrics",
             Provider::UnisonRich | Provider::UnisonWord | Provider::UnisonSynced | Provider::UnisonPlain => "Unison",
             Provider::BinimumRich | Provider::BinimumSynced => "BiniLyrics",
-            Provider::PortatoRich => "Better Lyrics Portato",
+            Provider::PortatoRich => "QQ Music",
             Provider::MusixmatchRich | Provider::MusixmatchSynced => "Musixmatch",
             Provider::NeteaseRich | Provider::NeteaseSynced => "NetEase",
             Provider::LrclibSynced | Provider::LrclibPlain => "LRCLib",
-            Provider::LegatoSynced => "Better Lyrics Legato",
+            Provider::LegatoSynced => "KuGou",
         }
     }
 
@@ -311,7 +311,14 @@ impl Client {
         if let Some((_, l)) = self.recent.lock().unwrap().iter().find(|(id, _)| id == q.video_id) {
             return Ok(l.clone());
         }
-        let (stream, unison, netease, lrclib) = tokio::join!(self.fetch_stream(q), self.fetch_unison(q), self.fetch_netease(q), self.fetch_lrclib(q));
+        let (stream, unison, netease, lrclib, qq, kugou) = tokio::join!(
+            self.fetch_stream(q),
+            self.fetch_unison(q),
+            self.fetch_netease(q),
+            self.fetch_lrclib(q),
+            self.fetch_qq(q),
+            self.fetch_kugou(q),
+        );
         let mut sources = Vec::new();
         match stream {
             Ok(s) => sources.extend(s),
@@ -328,6 +335,14 @@ impl Client {
         match lrclib {
             Ok(s) => sources.extend(s),
             Err(e) => log::info!("lrclib: {e:#}"),
+        }
+        match qq {
+            Ok(s) => sources.extend(s),
+            Err(e) => log::info!("qq: {e:#}"),
+        }
+        match kugou {
+            Ok(s) => sources.extend(s),
+            Err(e) => log::info!("kugou: {e:#}"),
         }
         if sources.is_empty() {
             return Ok(LyricsSet::default());
@@ -648,6 +663,255 @@ impl Client {
             }
             if let Some(plain) = plain_cand {
                 return Ok(vec![plain]);
+            }
+        }
+        Ok(vec![])
+    }
+
+    async fn fetch_qq(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
+        let title_parts = clean_title_with_artist(q.song, q.artist);
+        let clean_artist = clean_noise(&strip_brackets(q.artist.split(['/', ',', '&']).next().unwrap_or(q.artist)));
+        if title_parts.core.is_empty() && title_parts.full.is_empty() {
+            return Ok(vec![]);
+        }
+        let target_s = q.duration.unwrap_or(0) as f32;
+        let song_ms = q.duration.unwrap_or(0) as i32 * 1000;
+
+        let mut queries = Vec::new();
+        if !clean_artist.is_empty() {
+            queries.push(format!("{} {clean_artist}", title_parts.core));
+            if let Some(ref alt) = title_parts.alt {
+                queries.push(format!("{alt} {clean_artist}"));
+            }
+        }
+        queries.push(title_parts.core.clone());
+        if let Some(ref alt) = title_parts.alt {
+            queries.push(alt.clone());
+        }
+        queries.dedup();
+
+        let c_low = title_parts.core.to_lowercase();
+        let alt_low = title_parts.alt.as_ref().map(|s| s.to_lowercase());
+
+        for query in queries {
+            let resp = match self
+                .http
+                .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
+                .query(&[("p", "1"), ("n", "5"), ("w", query.as_str()), ("format", "json")])
+                .header("Referer", "https://y.qq.com/portal/player.html")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .timeout(Duration::from_secs(6))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => r,
+                _ => continue,
+            };
+
+            let text = resp.text().await.unwrap_or_default();
+            let trimmed = text.trim();
+            let json_slice = if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+                &trimmed[start..=end]
+            } else {
+                trimmed
+            };
+            let Ok(v) = serde_json::from_str::<Value>(json_slice) else { continue };
+            let Some(songs) = v["data"]["song"]["list"].as_array() else { continue };
+
+            for song in songs {
+                let songmid = match song["songmid"].as_str() {
+                    Some(m) if !m.is_empty() => m,
+                    _ => continue,
+                };
+                let name = song["songname"].as_str().unwrap_or("");
+                let clean_name = clean_noise(&strip_brackets(name)).to_lowercase();
+                let dur = song["interval"].as_i64().unwrap_or(0) as f32;
+
+                if target_s > 10.0 && dur > 10.0 && (dur - target_s).abs() > 30.0 {
+                    continue;
+                }
+
+                let is_title_match = clean_name == c_low
+                    || alt_low.as_ref().is_some_and(|a| clean_name == *a)
+                    || clean_name.contains(&c_low) || c_low.contains(&clean_name)
+                    || alt_low.as_ref().is_some_and(|a| clean_name.contains(a) || a.contains(&clean_name));
+                if !is_title_match && !c_low.is_empty() {
+                    continue;
+                }
+
+                let l_resp = match self
+                    .http
+                    .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
+                    .query(&[("songmid", songmid), ("format", "json")])
+                    .header("Referer", "https://y.qq.com/portal/player.html")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .timeout(Duration::from_secs(6))
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => r,
+                    _ => continue,
+                };
+
+                let l_text = l_resp.text().await.unwrap_or_default();
+                let l_trimmed = l_text.trim();
+                let l_slice = if let (Some(start), Some(end)) = (l_trimmed.find('{'), l_trimmed.rfind('}')) {
+                    &l_trimmed[start..=end]
+                } else {
+                    l_trimmed
+                };
+                let Ok(lv) = serde_json::from_str::<Value>(l_slice) else { continue };
+                let Some(raw_b64) = lv["lyric"].as_str().filter(|s| !s.trim().is_empty()) else { continue };
+                let decoded = decode_qq_lyric(raw_b64);
+                if decoded.is_empty() || !decoded.contains('[') {
+                    continue;
+                }
+
+                let mut lines = if decoded.trim_start().starts_with("<?xml") || decoded.contains("<Lyric_1") {
+                    parse_qrc(&decoded, song_ms, Some((&title_parts.core, &clean_artist)))
+                } else {
+                    parse_lrc(&decoded, song_ms)
+                };
+                lrc_fixers(&mut lines);
+                if derive_sync(&lines) != Sync::None {
+                    let writers = lrc_songwriters(&decoded);
+                    if let Some(lyrics) = Lyrics::new(Provider::PortatoRich, lines, None, writers) {
+                        return Ok(vec![lyrics]);
+                    }
+                }
+            }
+        }
+        Ok(vec![])
+    }
+
+    async fn fetch_kugou(&self, q: &Query<'_>) -> anyhow::Result<Vec<Lyrics>> {
+        let title_parts = clean_title_with_artist(q.song, q.artist);
+        let clean_artist = clean_noise(&strip_brackets(q.artist.split(['/', ',', '&']).next().unwrap_or(q.artist)));
+        if title_parts.core.is_empty() && title_parts.full.is_empty() {
+            return Ok(vec![]);
+        }
+        let target_s = q.duration.unwrap_or(0) as f32;
+        let song_ms = q.duration.unwrap_or(0) as i32 * 1000;
+
+        let mut queries = Vec::new();
+        if !clean_artist.is_empty() {
+            queries.push(format!("{} {clean_artist}", title_parts.core));
+            if let Some(ref alt) = title_parts.alt {
+                queries.push(format!("{alt} {clean_artist}"));
+            }
+        }
+        queries.push(title_parts.core.clone());
+        if let Some(ref alt) = title_parts.alt {
+            queries.push(alt.clone());
+        }
+        queries.dedup();
+
+        let c_low = title_parts.core.to_lowercase();
+        let alt_low = title_parts.alt.as_ref().map(|s| s.to_lowercase());
+
+        for query in queries {
+            let resp = match self
+                .http
+                .get("https://songsearch.kugou.com/song_search_v2")
+                .query(&[("keyword", query.as_str()), ("page", "1"), ("pagesize", "5"), ("platform", "WebFilter"), ("format", "json")])
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .timeout(Duration::from_secs(6))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => r,
+                _ => continue,
+            };
+
+            let Ok(v) = resp.json::<Value>().await else { continue };
+            let Some(lists) = v["data"]["lists"].as_array() else { continue };
+
+            for item in lists {
+                let file_hash = match item["FileHash"].as_str() {
+                    Some(h) if !h.is_empty() => h,
+                    _ => continue,
+                };
+                let name = item["SongName"].as_str().or_else(|| item["FileName"].as_str()).unwrap_or("");
+                let clean_name = clean_noise(&strip_brackets(name)).to_lowercase();
+                let dur = item["Duration"].as_i64().unwrap_or(0) as f32;
+
+                if target_s > 10.0 && dur > 10.0 && (dur - target_s).abs() > 30.0 {
+                    continue;
+                }
+
+                let is_title_match = clean_name == c_low
+                    || alt_low.as_ref().is_some_and(|a| clean_name == *a)
+                    || clean_name.contains(&c_low) || c_low.contains(&clean_name)
+                    || alt_low.as_ref().is_some_and(|a| clean_name.contains(a) || a.contains(&clean_name));
+                if !is_title_match && !c_low.is_empty() {
+                    continue;
+                }
+
+                let dur_ms = (dur as u32) * 1000;
+                let k_resp = match self
+                    .http
+                    .get("http://krcs.kugou.com/search")
+                    .query(&[
+                        ("ver", "1"),
+                        ("man", "yes"),
+                        ("client", "mobi"),
+                        ("duration", &dur_ms.to_string()),
+                        ("hash", file_hash),
+                    ])
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .timeout(Duration::from_secs(6))
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => r,
+                    _ => continue,
+                };
+
+                let Ok(kv) = k_resp.json::<Value>().await else { continue };
+                let Some(cands) = kv["candidates"].as_array() else { continue };
+                let Some(first) = cands.first() else { continue };
+                let (Some(id), Some(key)) = (
+                    first["id"].as_i64().or_else(|| first["id"].as_str().and_then(|s| s.parse().ok())),
+                    first["accesskey"].as_str(),
+                ) else {
+                    continue;
+                };
+
+                let dl_resp = match self
+                    .http
+                    .get("http://lyrics.kugou.com/download")
+                    .query(&[
+                        ("ver", "1"),
+                        ("client", "pc"),
+                        ("id", &id.to_string()),
+                        ("accesskey", key),
+                        ("fmt", "lrc"),
+                        ("charset", "utf8"),
+                    ])
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .timeout(Duration::from_secs(6))
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => r,
+                    _ => continue,
+                };
+
+                let Ok(dl_v) = dl_resp.json::<Value>().await else { continue };
+                let Some(b64) = dl_v["content"].as_str().filter(|s| !s.trim().is_empty()) else { continue };
+                let decoded = decode_qq_lyric(b64);
+                if decoded.is_empty() || !decoded.contains('[') {
+                    continue;
+                }
+
+                let mut lines = parse_lrc(&decoded, song_ms);
+                lrc_fixers(&mut lines);
+                if derive_sync(&lines) != Sync::None {
+                    let writers = lrc_songwriters(&decoded);
+                    if let Some(lyrics) = Lyrics::new(Provider::LegatoSynced, lines, None, writers) {
+                        return Ok(vec![lyrics]);
+                    }
+                }
             }
         }
         Ok(vec![])
@@ -1581,6 +1845,27 @@ fn keep_qrc_line(t: &mut QrcLine, st: &mut Singers, early: bool, meta: Option<(&
     t.text = rest;
     retime(t);
     true
+}
+
+fn decode_qq_lyric(raw: &str) -> String {
+    use base64::Engine;
+    let trimmed = raw.trim();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed));
+    let s = match decoded {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(_) => raw.to_string(),
+    };
+    s.replace("&#58;", ":")
+        .replace("&#10;", "\n")
+        .replace("&#32;", " ")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
 }
 
 /// `parseQRC`: QQ Music's syllable format.
