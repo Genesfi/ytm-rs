@@ -260,6 +260,10 @@ impl App {
                 self.share_pending = Some(share_url(&target));
                 self.toast(crate::tr!("status-link-copied"));
             }
+            Action::Copy(text) => {
+                self.share_pending = Some(text);
+                self.toast(crate::tr!("status-copied"));
+            }
             Action::Pin(id, on) => {
                 self.pinned.retain(|p| *p != id);
                 if on {

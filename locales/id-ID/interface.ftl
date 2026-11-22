@@ -60,6 +60,7 @@ ui-remove = Hapus
 ui-cancel = Batal
 ui-close = Tutup
 ui-copy-link = Salin tautan
+ui-copy-title-artist = Salin judul & artis
 ui-create = Buat
 ui-collaborate = Berkolaborasi
 ui-subscribe = Berlangganan

@@ -1,6 +1,7 @@
 ### Status messages and notifications.
 
 status-link-copied = Tautan disalin
+status-copied = Disalin ke papan klip
 status-starting-playback = Memulai pemutaran…
 status-playing-next = Diputar berikutnya
 status-added-queue = Ditambahkan ke antrian

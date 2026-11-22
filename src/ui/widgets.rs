@@ -1161,6 +1161,14 @@ pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, 
     if menu_action(ui, None, crate::tr!("ui-copy-link")) {
         acts.push(Action::Share(Target::Song(t.clone())));
     }
+    if menu_action(ui, Some(icon::COPY), crate::tr!("ui-copy-title-artist")) {
+        let text = if t.artists.is_empty() {
+            t.title.clone()
+        } else {
+            format!("{} - {}", t.title, t.artist_line())
+        };
+        acts.push(Action::Copy(text));
+    }
     match crate::downloads::path(&t.id) {
         Some(path) => {
             if menu_action(ui, Some(icon::FOLDER_OPEN), crate::tr!("widget-show-in-folder")) {

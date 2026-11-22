@@ -2381,6 +2381,14 @@ fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics:
                     menu_divider(ui);
                 }
                 widgets::song_actions_rest(ui, track, &mut app.actions);
+                if widgets::menu_action(ui, Some(theme::icon::COPY), crate::tr!("ui-copy-title-artist")) {
+                    let text = if track.artists.is_empty() {
+                        track.title.clone()
+                    } else {
+                        format!("{} - {}", track.title, track.artist_line())
+                    };
+                    app.actions.push(Action::Copy(text));
+                }
             });
     });
     open

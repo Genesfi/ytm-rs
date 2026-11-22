@@ -269,6 +269,7 @@ pub enum Action {
     RemoveLike(Track),
     RemoveDislike(String),
     Share(Target),
+    Copy(String),
     /// Keep a playlist at the top of the sidebar and Library › Playlists (true), or not.
     Pin(String, bool),
     AddToPlaylist(Vec<Track>),

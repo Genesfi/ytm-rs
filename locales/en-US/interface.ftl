@@ -60,6 +60,7 @@ ui-remove = Remove
 ui-cancel = Cancel
 ui-close = Close
 ui-copy-link = Copy link
+ui-copy-title-artist = Copy title & artist
 ui-create = Create
 ui-collaborate = Collaborate
 ui-subscribe = Subscribe

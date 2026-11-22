@@ -1,6 +1,7 @@
 ### Status messages and notifications.
 
 status-link-copied = Link copied
+status-copied = Copied to clipboard
 status-starting-playback = Starting playback…
 status-playing-next = Playing next
 status-added-queue = Added to queue
