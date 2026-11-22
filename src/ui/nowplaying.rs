@@ -2394,18 +2394,21 @@ fn lyric_options(app: &mut App, ui: &mut Ui) {
     let n = available.len();
     let mut pick = None;
     // One row, the source shown on it; the others open beside the menu.
-    let label = if n > 1 { crate::tr!("player-lyrics-source") } else { crate::tr!("player-only-lyrics-source") };
+    let label = crate::tr!("player-lyrics-source");
     let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), if n > 1 { Sense::click() } else { Sense::hover() });
     let resp = named(resp, label);
+    let resp = if n == 1 { resp.on_hover_text(crate::tr!("player-only-lyrics-source")) } else { resp };
     let open = egui::Popup::is_id_open(ui.ctx(), egui::containers::menu::SubMenu::id_from_widget_id(resp.id));
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), n > 1 && (resp.hovered() || open), 0.12);
     if h > 0.0 {
         ui.painter().rect_filled(row, theme::menu_item_radius(), theme::glass(0.08 * h));
     }
-    ui.painter().text(pos2(row.left() + 12.0, row.center().y), egui::Align2::LEFT_CENTER, label, theme::regular(14.0), theme::text());
     let arrow = if n > 1 { 22.0 } else { 0.0 };
-    let name_g = widgets::galley(ui, shown.name(), theme::regular(13.0), theme::text_dim(), row.width() * 0.5);
+    let name_g = widgets::galley(ui, shown.name(), theme::regular(13.0), theme::text_dim(), row.width() * 0.45);
     let name_x = row.right() - 12.0 - arrow - name_g.size().x;
+    let label_max_w = (name_x - 20.0 - (row.left() + 12.0)).max(50.0);
+    let label_g = widgets::galley(ui, label, theme::regular(14.0), theme::text(), label_max_w);
+    ui.painter().galley(pos2(row.left() + 12.0, row.center().y - label_g.size().y / 2.0), label_g, theme::text());
     let shown_sync = set.get(shown).map(|l| match l.sync {
         crate::lyrics::Sync::Word => shown.sync(),
         crate::lyrics::Sync::Line => crate::lyrics::SyncKind::Line,
