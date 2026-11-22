@@ -2049,12 +2049,12 @@ impl eframe::App for App {
                     shell::sidebar(self, ui)
                 });
             let q = theme::anim_bool(&ctx, "queue-drawer", self.queue_open && !self.np_open, 0.25).min(1.0);
-            queue_w = 340.0 * q;
             if q > 0.01 && screen.width() < 1000.0 {
                 // No room to give it without crushing the page: it floats over that instead,
                 // no wider than its default, since it has no edge to drag narrower here.
                 let w = shell::queue_w(self, (screen.width() - 40.0).min(shell::QUEUE_W.1));
-                let r = egui::Rect::from_min_size(egui::pos2(screen.right() - w * q, screen.top()), egui::vec2(w, screen.height() - self.bar_height()));
+                queue_w = w * q;
+                let r = egui::Rect::from_min_size(egui::pos2(screen.right() - queue_w, screen.top()), egui::vec2(w, screen.height() - self.bar_height()));
                 self.queue_float = Some(r);
                 egui::Area::new(egui::Id::unique("queue-float")).order(egui::Order::Middle).fixed_pos(r.min).show(&ctx, |ui| {
                     ui.allocate_rect(r, egui::Sense::click_and_drag());
@@ -2069,8 +2069,9 @@ impl eframe::App for App {
                 // As wide as it was dragged, leaving the page room beside it.
                 let room = screen.width() - side_w - shell::QUEUE_PAGE_MIN;
                 let w = shell::queue_w(self, room);
+                queue_w = w * q;
                 let panel = egui::Panel::right("queue").resizable(false)
-                    .exact_size(w * q)
+                    .exact_size(queue_w)
                     .frame(egui::Frame::new().fill(theme::panel(0.42)).inner_margin(egui::Margin::symmetric(14, 16)))
                     .show_separator_line(false)
                     .show(ui, |ui| shell::queue_drawer(self, ui));

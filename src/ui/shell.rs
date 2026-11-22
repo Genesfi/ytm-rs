@@ -1883,7 +1883,7 @@ pub(super) fn volume_slider(app: &mut App, ui: &mut Ui, slider: Rect, salt: &str
 // ------------------------------------------------------------------ queue drawer
 
 /// The side Up next's width: narrowest, as it starts, and widest.
-pub const QUEUE_W: (f32, f32, f32) = (300.0, 340.0, 720.0);
+pub const QUEUE_W: (f32, f32, f32) = (340.0, 360.0, 720.0);
 /// What the page keeps beside a widened Up next.
 pub const QUEUE_PAGE_MIN: f32 = 480.0;
 
@@ -1933,34 +1933,41 @@ pub fn queue_drawer(app: &mut App, ui: &mut Ui) {
         ui.painter().rect_filled(r, 0.0, theme::shade(0.35));
         white_on_card = theme::light();
     }
-    ui.horizontal(|ui| {
-        let label = crate::tr!("ui-up-next");
-        let (label, size) = if q.queue_upper { (label.to_uppercase(), 13.0) } else { (label.to_owned(), 20.0) };
-        let heading = egui::RichText::new(label).font(theme::bold(size));
-        ui.label(if white_on_card { heading.color(Color32::WHITE) } else { heading });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Left of the window buttons, which sit over the drawer's top right.
-            ui.add_space(super::titlebar::right_gap(ui.ctx(), ui.max_rect(), 0.0));
-            let close = if white_on_card {
-                let (r, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
-                let resp = named(resp, crate::tr!("ui-close-queue")).on_hover_text(crate::tr!("ui-close-queue")).on_hover_cursor(egui::CursorIcon::PointingHand);
-                let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
-                ui.painter().circle_filled(r.center(), 16.0, theme::with_alpha(Color32::WHITE, 0.15 * h));
-                widgets::focus_ring(ui, &resp, r, 16.0);
-                icon_at(ui, r.center(), icon::X, 16.0, Color32::WHITE);
-                resp
-            } else {
-                icon_button(ui, icon::X, 16.0, crate::tr!("ui-close-queue"), false)
-            };
-            if close.clicked() {
-                app.queue_open = false;
-            }
-            // Left of Close, with more in the queue than the song playing.
-            if app.queue.tracks.len() > usize::from(app.queue.index.is_some()) && icon_button(ui, icon::TRASH_2, 15.0, crate::tr!("ui-clear-queue"), false).clicked() {
-                app.actions.push(Action::QueueClear);
-            }
-        });
-    });
+    let header_rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 34.0));
+    let (header_row, _) = ui.allocate_exact_size(header_rect.size(), Sense::hover());
+    let mut header_ui = ui.new_child(egui::UiBuilder::new().max_rect(header_row));
+    let right_end = header_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Left of the window buttons, which sit over the drawer's top right.
+        ui.add_space(super::titlebar::right_gap(ui.ctx(), ui.max_rect(), 0.0));
+        let close = if white_on_card {
+            let (r, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+            let resp = named(resp, crate::tr!("ui-close-queue")).on_hover_text(crate::tr!("ui-close-queue")).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+            ui.painter().circle_filled(r.center(), 16.0, theme::with_alpha(Color32::WHITE, 0.15 * h));
+            widgets::focus_ring(ui, &resp, r, 16.0);
+            icon_at(ui, r.center(), icon::X, 16.0, Color32::WHITE);
+            resp
+        } else {
+            icon_button(ui, icon::X, 16.0, crate::tr!("ui-close-queue"), false)
+        };
+        if close.clicked() {
+            app.queue_open = false;
+        }
+        // Left of Close, with more in the queue than the song playing.
+        if app.queue.tracks.len() > usize::from(app.queue.index.is_some()) && icon_button(ui, icon::TRASH_2, 15.0, crate::tr!("ui-clear-queue"), false).clicked() {
+            app.actions.push(Action::QueueClear);
+        }
+        ui.cursor().left()
+    }).inner;
+
+    let title_w = (right_end - header_row.left() - 8.0).max(0.0);
+    let title_rect = Rect::from_min_size(header_row.min, vec2(title_w, header_row.height()));
+    let mut title_ui = header_ui.new_child(egui::UiBuilder::new().max_rect(title_rect));
+    title_ui.set_clip_rect(title_rect.intersect(ui.clip_rect()));
+    let label = crate::tr!("ui-up-next");
+    let (label, size) = if q.queue_upper { (label.to_uppercase(), 13.0) } else { (label.to_owned(), 20.0) };
+    let heading = egui::RichText::new(label).font(theme::bold(size));
+    title_ui.add(egui::Label::new(if white_on_card { heading.color(Color32::WHITE) } else { heading }).truncate());
     ui.add_space(8.0);
     queue_list(app, ui, "drawer");
 }

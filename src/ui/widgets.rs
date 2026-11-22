@@ -1865,11 +1865,14 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     // and the page wouldn't move, so the drag is handled here instead, locked to the
     // way it starts (the shelf sideways, the page up and down).
     let rect_id = sid.with("rect");
-    if egui::scroll_area::DragScroll::OnTouch.enabled(ui.ctx()) {
+    {
         use egui::scroll_area::{DragScroll, ScrollSource};
         area = area.scroll_source(ScrollSource { drag: DragScroll::Never, ..ScrollSource::default() });
         if let Some(rect) = ui.ctx().data(|d| d.get_temp::<Rect>(rect_id)) {
             let resp = ui.interact(rect, sid.with("touch"), Sense::DRAG);
+            if resp.drag_started() || resp.dragged() {
+                ui.ctx().data_mut(|d| d.remove::<f32>(target_id));
+            }
             axis_locked_drag(ui, &resp, sid.with("axis"));
         }
     }
@@ -1920,6 +1923,9 @@ fn axis_locked_drag(ui: &Ui, resp: &Response, state_id: egui::Id) {
             None => Vec2::ZERO,
         };
         if let Some(a) = axis {
+            if a == 0 && resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
             let mut v = Vec2::ZERO;
             v[a] = step[a];
             ui.scroll_with_delta_animation(v, ScrollAnimation::none());
