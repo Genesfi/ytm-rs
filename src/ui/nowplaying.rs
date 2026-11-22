@@ -2406,14 +2406,24 @@ fn lyric_options(app: &mut App, ui: &mut Ui) {
     let arrow = if n > 1 { 22.0 } else { 0.0 };
     let name_g = widgets::galley(ui, shown.name(), theme::regular(13.0), theme::text_dim(), row.width() * 0.5);
     let name_x = row.right() - 12.0 - arrow - name_g.size().x;
-    ui.painter().circle_filled(pos2(name_x - 9.0, row.center().y), 3.0, sync_color(shown.sync()));
+    let shown_sync = set.get(shown).map(|l| match l.sync {
+        crate::lyrics::Sync::Word => shown.sync(),
+        crate::lyrics::Sync::Line => crate::lyrics::SyncKind::Line,
+        crate::lyrics::Sync::None => crate::lyrics::SyncKind::Unsynced,
+    }).unwrap_or_else(|| shown.sync());
+    ui.painter().circle_filled(pos2(name_x - 9.0, row.center().y), 3.0, sync_color(shown_sync));
     ui.painter().galley(pos2(name_x, row.center().y - name_g.size().y / 2.0), name_g, theme::text_dim());
     if n > 1 {
         widgets::icon_at(ui, pos2(row.right() - 18.0, row.center().y), icon::CHEVRON_RIGHT, 14.0, theme::text_dim());
         egui::containers::menu::SubMenu::new().show(ui, &resp, |ui| {
             widgets::menu_body(ui, 300.0);
             for p in &available {
-                if source_row(ui, p.name(), p.sync(), *p == shown) {
+                let actual_sync = set.get(*p).map(|l| match l.sync {
+                    crate::lyrics::Sync::Word => p.sync(),
+                    crate::lyrics::Sync::Line => crate::lyrics::SyncKind::Line,
+                    crate::lyrics::Sync::None => crate::lyrics::SyncKind::Unsynced,
+                }).unwrap_or_else(|| p.sync());
+                if source_row(ui, p.name(), actual_sync, *p == shown) {
                     pick = Some(*p);
                     ui.close();
                 }

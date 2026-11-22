@@ -36,6 +36,7 @@ pub enum Provider {
     BinimumSynced,
     NeteaseSynced,
     LrclibSynced,
+    PortatoSynced,
     LegatoSynced,
     MusixmatchSynced,
     UnisonPlain,
@@ -52,7 +53,7 @@ pub enum SyncKind {
 }
 
 impl Provider {
-    pub const ALL: [Provider; 16] = [
+    pub const ALL: [Provider; 17] = [
         Provider::BLyricsRich,
         Provider::UnisonRich,
         Provider::BinimumRich,
@@ -65,6 +66,7 @@ impl Provider {
         Provider::BinimumSynced,
         Provider::NeteaseSynced,
         Provider::LrclibSynced,
+        Provider::PortatoSynced,
         Provider::LegatoSynced,
         Provider::MusixmatchSynced,
         Provider::UnisonPlain,
@@ -86,6 +88,7 @@ impl Provider {
             Provider::BinimumSynced => "binimum-synced",
             Provider::NeteaseSynced => "netease-synced",
             Provider::LrclibSynced => "lrclib-synced",
+            Provider::PortatoSynced => "portato-synced",
             Provider::LegatoSynced => "legato-synced",
             Provider::MusixmatchSynced => "musixmatch-synced",
             Provider::UnisonPlain => "unison-plain",
@@ -102,7 +105,7 @@ impl Provider {
             Provider::BLyricsRich | Provider::BLyricsSynced => "Better Lyrics",
             Provider::UnisonRich | Provider::UnisonWord | Provider::UnisonSynced | Provider::UnisonPlain => "Unison",
             Provider::BinimumRich | Provider::BinimumSynced => "BiniLyrics",
-            Provider::PortatoRich => "QQ Music",
+            Provider::PortatoRich | Provider::PortatoSynced => "QQ Music",
             Provider::MusixmatchRich | Provider::MusixmatchSynced => "Musixmatch",
             Provider::NeteaseRich | Provider::NeteaseSynced => "NetEase",
             Provider::LrclibSynced | Provider::LrclibPlain => "LRCLib",
@@ -119,6 +122,7 @@ impl Provider {
             | Provider::BinimumSynced
             | Provider::NeteaseSynced
             | Provider::LrclibSynced
+            | Provider::PortatoSynced
             | Provider::LegatoSynced
             | Provider::MusixmatchSynced => SyncKind::Line,
             Provider::UnisonPlain | Provider::LrclibPlain => SyncKind::Unsynced,
@@ -293,6 +297,18 @@ pub struct Query<'a> {
     pub duration: Option<u32>,
 }
 
+fn artist_matches(candidate: &str, target: &str) -> bool {
+    let t_low = target.trim().to_lowercase();
+    if t_low.is_empty() {
+        return true;
+    }
+    let c_low = clean_noise(&strip_brackets(candidate)).to_lowercase();
+    if c_low.is_empty() {
+        return false;
+    }
+    c_low.contains(&t_low) || t_low.contains(&c_low)
+}
+
 impl Client {
     pub fn new(http: reqwest::Client, data_dir: &Path) -> Self {
         let jwt_file = data_dir.join("lyrics_jwt");
@@ -424,22 +440,22 @@ impl Client {
             return Ok(vec![]);
         }
         let target_ms = q.duration.unwrap_or(0) as i64 * 1000;
-        let mut queries: Vec<String> = Vec::new();
+        let mut queries: Vec<(String, bool)> = Vec::new();
         if !clean_artist.is_empty() {
-            queries.push(format!("{} {clean_artist}", title_parts.core));
+            queries.push((format!("{} {clean_artist}", title_parts.core), true));
             if let Some(ref alt) = title_parts.alt {
-                queries.push(format!("{alt} {clean_artist}"));
+                queries.push((format!("{alt} {clean_artist}"), true));
             }
             if q.song.trim() != title_parts.core {
-                queries.push(format!("{} {clean_artist}", title_parts.full));
+                queries.push((format!("{} {clean_artist}", title_parts.full), true));
             }
         }
-        queries.push(title_parts.core.clone());
+        queries.push((title_parts.core.clone(), false));
         if let Some(ref alt) = title_parts.alt {
-            queries.push(alt.clone());
+            queries.push((alt.clone(), false));
         }
-        queries.push(title_parts.full.clone());
-        queries.dedup();
+        queries.push((title_parts.full.clone(), false));
+        queries.dedup_by(|a, b| a.0 == b.0);
 
         let c_low = title_parts.core.to_lowercase();
         let a_low = clean_artist.to_lowercase();
@@ -448,7 +464,7 @@ impl Client {
         let mut ranked: Vec<(f32, i64)> = Vec::new();
         let mut seen_ids: Vec<i64> = Vec::new();
 
-        for query in queries {
+        for (query, has_artist) in queries {
             let resp = self
                 .http
                 .get("https://music.163.com/api/search/get/")
@@ -474,17 +490,27 @@ impl Client {
                 let name = s["name"].as_str().unwrap_or("").to_lowercase();
                 let clean_name = clean_noise(&strip_brackets(&name)).to_lowercase();
                 let dur = s["duration"].as_i64().unwrap_or(0);
-                let artist_match = s["artists"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|a| a["name"].as_str())
-                            .any(|n| {
-                                let nl = n.to_lowercase();
-                                !a_low.is_empty() && (nl.contains(&a_low) || a_low.contains(&nl))
-                            })
-                    })
-                    .unwrap_or(false);
+                let artist_match = if a_low.is_empty() {
+                    true
+                } else {
+                    s["artists"]
+                        .as_array()
+                        .map(|arr| arr.iter().filter_map(|a| a["name"].as_str()).any(|n| artist_matches(n, &clean_artist)))
+                        .unwrap_or(false)
+                };
+
+                // Reject candidate if searched without artist and singer does not match
+                if !has_artist && !a_low.is_empty() && !artist_match {
+                    continue;
+                }
+
+                if target_ms > 0 && dur > 0 {
+                    let diff_s = (dur - target_ms).abs() as f32 / 1000.0;
+                    let max_diff = if artist_match { 8.0 } else { 4.0 };
+                    if diff_s > max_diff {
+                        continue;
+                    }
+                }
 
                 let is_title_match = name == c_low || clean_name == c_low
                     || alt_low.as_ref().is_some_and(|a| name == *a || clean_name == *a)
@@ -514,8 +540,6 @@ impl Client {
                         score += 30.0;
                     } else if diff_s <= 8.0 {
                         score += 15.0;
-                    } else if diff_s > 35.0 {
-                        score -= 25.0;
                     }
                 }
                 if score >= 75.0 {
@@ -595,6 +619,7 @@ impl Client {
         titles.dedup();
 
         let c_low = title_parts.core.to_lowercase();
+        let a_low = clean_artist.to_lowercase();
         let alt_low = title_parts.alt.as_ref().map(|s| s.to_lowercase());
         let song_ms = q.duration.unwrap_or(0) as i32 * 1000;
         let target_s = q.duration.unwrap_or(0) as f32;
@@ -628,8 +653,18 @@ impl Client {
                 let track = item["trackName"].as_str().or_else(|| item["name"].as_str()).unwrap_or("");
                 let t_clean = clean_noise(&strip_brackets(track)).to_lowercase();
                 let dur = item["duration"].as_f64().unwrap_or(0.0) as f32;
-                if target_s > 10.0 && dur > 10.0 && (dur - target_s).abs() > 30.0 {
-                    continue;
+                let item_artist = item["artistName"].as_str().unwrap_or("");
+                let artist_match = if a_low.is_empty() {
+                    true
+                } else {
+                    artist_matches(item_artist, &clean_artist)
+                };
+
+                if target_s > 10.0 && dur > 10.0 {
+                    let max_diff = if artist_match { 8.0 } else { 4.0 };
+                    if (dur - target_s).abs() > max_diff {
+                        continue;
+                    }
                 }
                 // Verify candidate actually matches the requested title
                 let is_lrclib_match = t_clean == c_low
@@ -678,23 +713,24 @@ impl Client {
         let target_s = q.duration.unwrap_or(0) as f32;
         let song_ms = q.duration.unwrap_or(0) as i32 * 1000;
 
-        let mut queries = Vec::new();
+        let mut queries: Vec<(String, bool)> = Vec::new();
         if !clean_artist.is_empty() {
-            queries.push(format!("{} {clean_artist}", title_parts.core));
+            queries.push((format!("{} {clean_artist}", title_parts.core), true));
             if let Some(ref alt) = title_parts.alt {
-                queries.push(format!("{alt} {clean_artist}"));
+                queries.push((format!("{alt} {clean_artist}"), true));
             }
         }
-        queries.push(title_parts.core.clone());
+        queries.push((title_parts.core.clone(), false));
         if let Some(ref alt) = title_parts.alt {
-            queries.push(alt.clone());
+            queries.push((alt.clone(), false));
         }
-        queries.dedup();
+        queries.dedup_by(|a, b| a.0 == b.0);
 
         let c_low = title_parts.core.to_lowercase();
+        let a_low = clean_artist.to_lowercase();
         let alt_low = title_parts.alt.as_ref().map(|s| s.to_lowercase());
 
-        for query in queries {
+        for (query, has_artist) in queries {
             let resp = match self
                 .http
                 .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
@@ -728,8 +764,25 @@ impl Client {
                 let clean_name = clean_noise(&strip_brackets(name)).to_lowercase();
                 let dur = song["interval"].as_i64().unwrap_or(0) as f32;
 
-                if target_s > 10.0 && dur > 10.0 && (dur - target_s).abs() > 30.0 {
+                let artist_match = if a_low.is_empty() {
+                    true
+                } else {
+                    song["singer"]
+                        .as_array()
+                        .map(|arr| arr.iter().filter_map(|s| s["name"].as_str()).any(|n| artist_matches(n, &clean_artist)))
+                        .unwrap_or(false)
+                };
+
+                // Reject candidate if searched without artist and singer does not match
+                if !has_artist && !a_low.is_empty() && !artist_match {
                     continue;
+                }
+
+                if target_s > 10.0 && dur > 10.0 {
+                    let max_diff = if artist_match { 8.0 } else { 4.0 };
+                    if (dur - target_s).abs() > max_diff {
+                        continue;
+                    }
                 }
 
                 let is_title_match = clean_name == c_low
@@ -768,15 +821,22 @@ impl Client {
                     continue;
                 }
 
-                let mut lines = if decoded.trim_start().starts_with("<?xml") || decoded.contains("<Lyric_1") {
+                let is_qrc = decoded.trim_start().starts_with("<?xml") || decoded.contains("<Lyric_1");
+                let mut lines = if is_qrc {
                     parse_qrc(&decoded, song_ms, Some((&title_parts.core, &clean_artist)))
                 } else {
                     parse_lrc(&decoded, song_ms)
                 };
                 lrc_fixers(&mut lines);
-                if derive_sync(&lines) != Sync::None {
+                let sync = derive_sync(&lines);
+                if sync != Sync::None {
+                    let prov = if sync == Sync::Word {
+                        Provider::PortatoRich
+                    } else {
+                        Provider::PortatoSynced
+                    };
                     let writers = lrc_songwriters(&decoded);
-                    if let Some(lyrics) = Lyrics::new(Provider::PortatoRich, lines, None, writers) {
+                    if let Some(lyrics) = Lyrics::new(prov, lines, None, writers) {
                         return Ok(vec![lyrics]);
                     }
                 }
@@ -794,23 +854,24 @@ impl Client {
         let target_s = q.duration.unwrap_or(0) as f32;
         let song_ms = q.duration.unwrap_or(0) as i32 * 1000;
 
-        let mut queries = Vec::new();
+        let mut queries: Vec<(String, bool)> = Vec::new();
         if !clean_artist.is_empty() {
-            queries.push(format!("{} {clean_artist}", title_parts.core));
+            queries.push((format!("{} {clean_artist}", title_parts.core), true));
             if let Some(ref alt) = title_parts.alt {
-                queries.push(format!("{alt} {clean_artist}"));
+                queries.push((format!("{alt} {clean_artist}"), true));
             }
         }
-        queries.push(title_parts.core.clone());
+        queries.push((title_parts.core.clone(), false));
         if let Some(ref alt) = title_parts.alt {
-            queries.push(alt.clone());
+            queries.push((alt.clone(), false));
         }
-        queries.dedup();
+        queries.dedup_by(|a, b| a.0 == b.0);
 
         let c_low = title_parts.core.to_lowercase();
+        let a_low = clean_artist.to_lowercase();
         let alt_low = title_parts.alt.as_ref().map(|s| s.to_lowercase());
 
-        for query in queries {
+        for (query, has_artist) in queries {
             let resp = match self
                 .http
                 .get("https://songsearch.kugou.com/song_search_v2")
@@ -835,9 +896,23 @@ impl Client {
                 let name = item["SongName"].as_str().or_else(|| item["FileName"].as_str()).unwrap_or("");
                 let clean_name = clean_noise(&strip_brackets(name)).to_lowercase();
                 let dur = item["Duration"].as_i64().unwrap_or(0) as f32;
+                let singer = item["SingerName"].as_str().unwrap_or("");
+                let artist_match = if a_low.is_empty() {
+                    true
+                } else {
+                    artist_matches(singer, &clean_artist)
+                };
 
-                if target_s > 10.0 && dur > 10.0 && (dur - target_s).abs() > 30.0 {
+                // Reject candidate if searched without artist and singer does not match
+                if !has_artist && !a_low.is_empty() && !artist_match {
                     continue;
+                }
+
+                if target_s > 10.0 && dur > 10.0 {
+                    let max_diff = if artist_match { 8.0 } else { 4.0 };
+                    if (dur - target_s).abs() > max_diff {
+                        continue;
+                    }
                 }
 
                 let is_title_match = clean_name == c_low
@@ -2347,5 +2422,25 @@ Two");
         assert_eq!(bl.sync, Sync::Word);
         assert!(bl.lines.iter().any(|l| l.timed_roman.len() > 3));
         assert_eq!(bl.songwriters, vec!["野田洋次郎"]);
+    }
+
+    #[test]
+    fn artist_matching_rejects_unrelated_artists() {
+        assert!(!artist_matches("Sia", "HIBANA"));
+        assert!(!artist_matches("KAITO", "HIBANA"));
+        assert!(artist_matches("Sia", "Sia"));
+        assert!(artist_matches("Sia, Belinda", "Sia"));
+        assert!(artist_matches("YOASOBI (ヨアソビ)", "YOASOBI"));
+        assert!(artist_matches("HIBANA", ""));
+    }
+
+    #[test]
+    fn portato_provider_variants() {
+        assert_eq!(Provider::PortatoRich.name(), "QQ Music");
+        assert_eq!(Provider::PortatoSynced.name(), "QQ Music");
+        assert_eq!(Provider::PortatoRich.sync(), SyncKind::Word);
+        assert_eq!(Provider::PortatoSynced.sync(), SyncKind::Line);
+        assert!(Provider::ALL.contains(&Provider::PortatoRich));
+        assert!(Provider::ALL.contains(&Provider::PortatoSynced));
     }
 }
