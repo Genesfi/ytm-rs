@@ -164,8 +164,7 @@ impl Session {
             .filter_map(|(scheme, cookie)| {
                 let sid = self.get(cookie)?;
                 let hash = Sha1::digest(format!("{ts} {sid} {origin}"));
-                let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-                Some(format!("{scheme} {ts}_{hex}"))
+                Some(format!("{scheme} {ts}_{hash:x}"))
             })
             .collect();
         anyhow::ensure!(!parts.is_empty(), "signed-in session has no SAPISID cookie");
@@ -190,7 +189,7 @@ impl Session {
     /// change anything. Only youtube.com-wide cookies count, and deletions are left out:
     /// a revoked session is noticed by the signed-out answers instead.
     pub fn updated<'a>(&self, set_cookies: impl IntoIterator<Item = &'a str>) -> Option<Self> {
-        let year = 1970 + SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() / 31_556_952);
+        let year = 1970 + crate::unix_secs() / 31_556_952;
         let mut jar: Vec<(String, String)> = self
             .cookie
             .split(';')

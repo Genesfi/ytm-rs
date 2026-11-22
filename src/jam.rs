@@ -148,6 +148,20 @@ pub struct Jam {
 }
 
 impl Jam {
+    /// Channel-backed connection for checking the UI's outbound commands without a relay.
+    #[cfg(test)]
+    pub(crate) fn test_connection() -> (Jam, impl FnMut() -> Vec<serde_json::Value>) {
+        let (out, mut commands) = mpsc::unbounded_channel();
+        let (_, events) = unbounded();
+        let conn = Jam { code: "ABC234".into(), out, events };
+        let read = move || {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .map(|m| match m { Out::Text(t) => serde_json::from_str(&t).unwrap(), Out::Leave => serde_json::json!({ "t": "bye" }) })
+                .collect()
+        };
+        (conn, read)
+    }
+
     /// Connect to room `code`: `create` starts it (we're the host), otherwise join.
     pub fn start(backend: &crate::backend::Backend, code: String, create: bool, name: String) -> Jam {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
@@ -296,10 +310,6 @@ fn yes() -> bool {
     true
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
-}
-
 /// Why a connection ended.
 enum End {
     /// Left, or the room ended: nothing to show or retry.
@@ -328,7 +338,7 @@ impl Conn {
 
     /// When (locally) the server time `ts` was.
     fn local_instant(&self, ts: i64) -> Instant {
-        let age = (now_ms() + self.offset.load(Ordering::Relaxed) - ts).clamp(0, 60_000);
+        let age = ((crate::unix_ms() as i64) + self.offset.load(Ordering::Relaxed) - ts).clamp(0, 60_000);
         Instant::now() - Duration::from_millis(age as u64)
     }
 
@@ -374,15 +384,15 @@ impl Conn {
 
     async fn session(&mut self, out: &mut mpsc::UnboundedReceiver<Out>) -> End {
         let base = std::env::var("YTM_JAM_SERVER").unwrap_or_else(|_| SERVER.to_owned());
-        let name: String = url_encode(&self.name);
-        let url = format!("{}/jam/{}?create={}&name={name}&v=1", base.trim_end_matches('/'), self.code, self.create as u8);
+        let create = if self.create { "1" } else { "0" };
+        let url = url::Url::parse_with_params(&format!("{}/jam/{}", base.trim_end_matches('/'), self.code), [("create", create), ("name", &self.name), ("v", "1")]);
         // Through the proxy setting, like everything else.
         let connect = async {
-            let u = url::Url::parse(&url)?;
+            let u = url?;
             let host = u.host_str().unwrap_or_default().to_owned();
             let port = u.port_or_known_default().unwrap_or(443);
             let tcp = crate::proxy::connect(&host, port).await?;
-            anyhow::Ok(tokio_tungstenite::client_async_tls(url, tcp).await?)
+            anyhow::Ok(tokio_tungstenite::client_async_tls(u.as_str(), tcp).await?)
         };
         let ws = match tokio::time::timeout(Duration::from_secs(10), connect).await {
             Ok(Ok((ws, _))) => ws,
@@ -422,7 +432,7 @@ impl Conn {
                 }
                 _ = sync.tick(), if pings_left > 0 => {
                     pings_left -= 1;
-                    let _ = tx.send(Message::text(format!(r#"{{"t":"ping","c":{}}}"#, now_ms()))).await;
+                    let _ = tx.send(Message::text(format!(r#"{{"t":"ping","c":{}}}"#, crate::unix_ms()))).await;
                 }
                 msg = rx.next() => {
                     last_rx = Instant::now();
@@ -447,7 +457,7 @@ impl Conn {
                     match m {
                         In::Welcome { you, host, control, queue, members, state, tick, now } => {
                             // A first guess until the pings answer.
-                            self.offset.store(now - now_ms(), Ordering::Relaxed);
+                            self.offset.store(now - (crate::unix_ms() as i64), Ordering::Relaxed);
                             pings_left = 5;
                             self.create = false;
                             self.emit(Event::Welcome { you, host, control, queue, members });
@@ -472,7 +482,7 @@ impl Conn {
                         }
                         In::Req { from, name, cmd } => self.emit(Event::Req { from, name, cmd }),
                         In::Pong { c, s } => {
-                            let rtt = now_ms() - c;
+                            let rtt = (crate::unix_ms() as i64) - c;
                             if rtt >= 0 && rtt < best_rtt {
                                 best_rtt = rtt;
                                 self.offset.store(s - (c + rtt / 2), Ordering::Relaxed);
@@ -499,15 +509,6 @@ impl Conn {
             }
         }
     }
-}
-
-fn url_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }
 
 #[cfg(test)]

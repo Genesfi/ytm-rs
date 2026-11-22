@@ -61,7 +61,7 @@ use crate::model::{Card, Chip, Shelf, Target, Track};
 use crate::shader::Background;
 use crate::theme;
 use crate::ytm::Scope;
-use lists::{LIKED_MUSIC, Lists};
+use lists::{LIBRARY_SONGS, LIKED_MUSIC, Lists};
 use queue::Queue;
 use shuffle::{shuffle, shuffle_to_play};
 use dev::{dev_screenshot, dev_var};
@@ -91,6 +91,9 @@ pub enum Page {
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum LibTab {
     Playlists,
+    /// Every song saved to the library (`LIBRARY_SONGS`), as the website's Songs.
+    Saved,
+    /// Liked songs: the Liked Music playlist.
     Songs,
     Albums,
     /// Subscribed artists.
@@ -104,14 +107,15 @@ pub enum LibTab {
 }
 
 impl LibTab {
-    pub(super) const ALL: [Self; 8] = [
-        Self::Playlists, Self::Songs, Self::Albums, Self::Artists,
+    pub(super) const ALL: [Self; 9] = [
+        Self::Playlists, Self::Saved, Self::Songs, Self::Albums, Self::Artists,
         Self::Podcasts, Self::History, Self::Uploads, Self::Downloads,
     ];
 
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Playlists => crate::tr!("nav-playlists"),
+            Self::Saved => crate::tr!("nav-songs"),
             Self::Songs => crate::tr!("nav-liked-songs"),
             Self::Albums => crate::tr!("nav-albums"),
             Self::Artists => crate::tr!("nav-artists"),
@@ -136,11 +140,12 @@ pub use mini::{init_pill, set_hwnd as set_mini_hwnd};
 
 /// Settings › General › Window › Open on: the pages the app can start on, as saved and
 /// as listed.
-pub(super) const START_PAGES: [(&str, Page); 11] = [
+pub(super) const START_PAGES: [(&str, Page); 12] = [
     ("home", Page::Home),
     ("explore", Page::Explore),
     ("stats", Page::Stats),
     ("library", Page::Library(LibTab::Playlists)),
+    ("songs", Page::Library(LibTab::Saved)),
     ("liked", Page::Library(LibTab::Songs)),
     ("albums", Page::Library(LibTab::Albums)),
     ("artists", Page::Library(LibTab::Artists)),
@@ -207,7 +212,7 @@ impl AccentSource {
             Self::Album => "album".into(),
             Self::System => "system".into(),
             Self::File => "file".into(),
-            Self::Custom(c) => format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()),
+            Self::Custom(c) => egui::ecolor::HexColor::Hex6(c).to_string(),
         }
     }
 
@@ -471,8 +476,11 @@ pub struct App {
     /// The current page's request failed with nothing cached: show a retry, not a skeleton.
     load_failed: bool,
     search_text: String,
-    suggestions: (String, Vec<crate::ytm::Suggestion>),
-    /// The suggestion picked with the arrow keys, which Enter searches.
+    /// What was typed, the search terms for it, and the songs, artists and albums it
+    /// most likely means.
+    suggestions: (String, Vec<crate::ytm::Suggestion>, Vec<Card>),
+    /// The suggestion picked with the arrow keys, which Enter searches (or, past the
+    /// terms, plays or opens).
     suggest_sel: Option<usize>,
     /// Bumped when a past search is removed or the account changes: suggestions
     /// requested before that are dropped when they arrive, rather than bring it back.
@@ -636,6 +644,9 @@ pub struct App {
     /// The play button and volume slider in the accent colour, like the progress line.
     accent_controls: bool,
     anim_bg: bool,
+    /// The animated background's speed and brightness, as multiples of the theme's.
+    bg_speed: f32,
+    bg_brightness: f32,
     /// Panels frost what's behind them, in themes that have them do so.
     glass_on: bool,
     reactive_bg: bool,
@@ -689,6 +700,8 @@ pub struct App {
     /// Background animation clock: advances only while music plays, so pausing
     /// freezes the motion instead of jumping when resumed.
     bg_time: f64,
+    /// Clock of a theme's turning or pulsing cover, at Background speed.
+    layer_time: f64,
     last_frame: f64,
     search_rect: Option<egui::Rect>,
     search_focused: bool,
@@ -706,6 +719,8 @@ pub struct App {
     np_open: bool,
     np_tab: NpTab,
     queue_open: bool,
+    /// The side Up next's width, as its left edge was last dragged to.
+    queue_w: f32,
     /// Where the queue floats over the page in a narrow window, as last drawn.
     queue_float: Option<egui::Rect>,
     /// A song row being dragged.
@@ -1031,8 +1046,11 @@ impl App {
             updater: None,
             storage: Default::default(),
             auto_update: get("auto_update").is_none_or(|v| v == "1"),
-            // A nightly build stays on nightlies until told otherwise.
-            update_nightly: get("update_channel").map_or_else(|| crate::update::is_nightly(&crate::update::build_version()), |v| v == "nightly"),
+            // A nightly build stays on nightlies until told otherwise. In a Flatpak,
+            // Flatpak picks the version, so it's whichever this build is.
+            update_nightly: get("update_channel")
+                .filter(|_| !crate::update::flatpak())
+                .map_or_else(|| crate::update::is_nightly(&crate::update::build_version()), |v| v == "nightly"),
             close_to_tray: get("close_to_tray").is_some_and(|v| v == "1"),
             wgpu_renderer,
             app_icon,
@@ -1093,6 +1111,8 @@ impl App {
             album_accent_last_frame: 0.0,
             accent_controls: get("accent_controls").is_some_and(|v| v == "1"),
             anim_bg: get("anim_bg").is_none_or(|v| v == "1"),
+            bg_speed: shell::load_factor(get("bg_speed"), shell::BG_SPEED),
+            bg_brightness: shell::load_factor(get("bg_brightness"), shell::BG_BRIGHTNESS),
             glass_on: get("glass_on").is_none_or(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
             dim_bright: get("dim_bright").is_none_or(|v| v == "1"),
@@ -1126,6 +1146,7 @@ impl App {
             segment_skipped: f64::NEG_INFINITY,
             hotkeys,
             bg_time: 0.0,
+            layer_time: 0.0,
             last_frame: 0.0,
             search_rect: None,
             search_focused: false,
@@ -1136,6 +1157,7 @@ impl App {
             np_open: false,
             np_tab: if get("np_art").is_some_and(|v| v == "1") { NpTab::Art } else { NpTab::Lyrics },
             queue_open: false,
+            queue_w: shell::load_queue_w(get("queue_width")),
             queue_float: None,
             row_drag: None,
             settings_tab: Default::default(),
@@ -1213,6 +1235,7 @@ impl App {
             Ok("library") => app.go(Page::Library(LibTab::Playlists)),
             Ok("artists") => app.go(Page::Library(LibTab::Artists)),
             Ok("uploads") => app.go(Page::Library(LibTab::Uploads)),
+            Ok("songs") => app.go(Page::Library(LibTab::Saved)),
             Ok("liked") => app.go(Page::Library(LibTab::Songs)),
             Ok("history") => app.go(Page::Library(LibTab::History)),
             Ok("downloads") => app.go(Page::Library(LibTab::Downloads)),
@@ -1324,7 +1347,7 @@ impl App {
     /// it is until the new data arrives. Unlike a visit, it also reloads a list kept from
     /// the last few minutes and the search already shown.
     fn refresh(&mut self) {
-        let liked_out = self.page == Page::Library(LibTab::Songs) && !self.logged_in;
+        let liked_out = matches!(self.page, Page::Library(LibTab::Songs | LibTab::Saved)) && !self.logged_in;
         if let Some(id) = self.page_list().filter(|_| !liked_out).map(str::to_owned)
             && let Some(s) = self.lists.load(&id, matches!(self.page, Page::Album(_)), false)
         {
@@ -1394,6 +1417,12 @@ impl App {
                 }
                 None
             }
+            Page::Library(LibTab::Saved) => {
+                if self.logged_in {
+                    self.visit_list(LIBRARY_SONGS, false);
+                }
+                None
+            }
             // On this computer: no request, and the files are read again on each visit.
             Page::Library(LibTab::Downloads) => {
                 self.read_downloads();
@@ -1417,6 +1446,7 @@ impl App {
             Page::Library(LibTab::History) => self.history.is_some(),
             Page::Library(LibTab::Uploads) => self.uploads.is_some(),
             Page::Library(LibTab::Songs) => self.opened(LIKED_MUSIC).is_some(),
+            Page::Library(LibTab::Saved) => self.opened(LIBRARY_SONGS).is_some(),
             Page::Library(LibTab::Downloads) => true,
             Page::Library(_) => self.library.is_some(),
             _ => false,
@@ -1454,6 +1484,7 @@ impl App {
         match &self.page {
             Page::Album(id) | Page::Playlist(id) => Some(id),
             Page::Library(LibTab::Songs) => Some(LIKED_MUSIC),
+            Page::Library(LibTab::Saved) => Some(LIBRARY_SONGS),
             _ => None,
         }
     }
@@ -2000,8 +2031,10 @@ impl eframe::App for App {
                     .outer_margin(egui::Margin { left: 10, right: 4, top: 10 + below, bottom: 10 })
                     .inner_margin(egui::Margin::symmetric(12, 14)),
             };
+            // As wide as it's drawn: the rail's width once collapsed.
+            let side_w = shell::sidebar_w(self) - (shell::sidebar_w(self) - shell::rail_w(self)) * shell::sidebar_collapse(self, &ctx);
             egui::Panel::left("nav").resizable(false)
-                .exact_size(shell::sidebar_w(self) - (shell::sidebar_w(self) - shell::rail_w(self)) * shell::sidebar_collapse(self, &ctx))
+                .exact_size(side_w)
                 .frame(side_frame)
                 .show_separator_line(false)
                 .show(ui, |ui| {
@@ -2018,8 +2051,10 @@ impl eframe::App for App {
             let q = theme::anim_bool(&ctx, "queue-drawer", self.queue_open && !self.np_open, 0.25).min(1.0);
             queue_w = 340.0 * q;
             if q > 0.01 && screen.width() < 1000.0 {
-                // No room to give it without crushing the page: it floats over that instead.
-                let r = egui::Rect::from_min_size(egui::pos2(screen.right() - 340.0 * q, screen.top()), egui::vec2(340.0, screen.height() - self.bar_height()));
+                // No room to give it without crushing the page: it floats over that instead,
+                // no wider than its default, since it has no edge to drag narrower here.
+                let w = shell::queue_w(self, (screen.width() - 40.0).min(shell::QUEUE_W.1));
+                let r = egui::Rect::from_min_size(egui::pos2(screen.right() - w * q, screen.top()), egui::vec2(w, screen.height() - self.bar_height()));
                 self.queue_float = Some(r);
                 egui::Area::new(egui::Id::unique("queue-float")).order(egui::Order::Middle).fixed_pos(r.min).show(&ctx, |ui| {
                     ui.allocate_rect(r, egui::Sense::click_and_drag());
@@ -2031,11 +2066,18 @@ impl eframe::App for App {
                     shell::queue_drawer(self, &mut inner);
                 });
             } else if q > 0.01 {
-                egui::Panel::right("queue").resizable(false)
-                    .exact_size(340.0 * q)
+                // As wide as it was dragged, leaving the page room beside it.
+                let room = screen.width() - side_w - shell::QUEUE_PAGE_MIN;
+                let w = shell::queue_w(self, room);
+                let panel = egui::Panel::right("queue").resizable(false)
+                    .exact_size(w * q)
                     .frame(egui::Frame::new().fill(theme::panel(0.42)).inner_margin(egui::Margin::symmetric(14, 16)))
                     .show_separator_line(false)
                     .show(ui, |ui| shell::queue_drawer(self, ui));
+                // Once it's all the way out: the left edge drags.
+                if q >= 1.0 {
+                    shell::queue_resize_handle(self, &ctx, panel.response.rect, room);
+                }
             }
             let sheet = app_style.sheet.map_or((Color32::TRANSPARENT, 0), |[a, r]| (theme::glass(a), r as u8));
             egui::CentralPanel::default()
@@ -2124,31 +2166,9 @@ impl eframe::App for App {
         theme::set_mode(&ctx, light);
     }
 
-    /// Dev hook: `YTM_FAKE_POINTER=x,y` parks a synthetic pointer there, for testing
-    /// hover behaviour without touching the real mouse.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.zoom = ctx.zoom_factor();
         dev::dev_script(ctx, raw);
-        // Dev hook: YTM_FAKE_WHEEL="secs,notches" injects one wheel event, for testing.
-        if let Some((at, n)) = dev_var("YTM_FAKE_WHEEL").and_then(|v| {
-            let (a, n) = v.split_once(',')?;
-            Some((a.parse::<f64>().ok()?, n.parse::<f32>().ok()?))
-        }) {
-            let fired = egui::Id::unique("dev-wheel-fired");
-            let t = raw.time.unwrap_or(0.0);
-            if t >= at && !ctx.data(|d| d.get_temp::<bool>(fired).unwrap_or(false)) {
-                ctx.data_mut(|d| d.insert_temp(fired, true));
-                raw.events.push(egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Line,
-                    delta: egui::vec2(0.0, -n),
-                    phase: egui::TouchPhase::Move,
-                    modifiers: egui::Modifiers::NONE,
-                    source: egui::MouseWheelSource::Wheel,
-                });
-            } else if t < at {
-                ctx.request_repaint_after(Duration::from_millis(100));
-            }
-        }
         // Dev hook: YTM_LOG_WHEEL=1 logs the wheel events the window sends.
         if dev_var("YTM_LOG_WHEEL").is_some() {
             for e in raw.events.iter().filter(|e| matches!(e, egui::Event::MouseWheel { .. })) {
@@ -2162,13 +2182,6 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         frame_pace(raw, std::mem::take(&mut self.full_rate_frame));
-        if let Some((x, y)) = dev_var("YTM_FAKE_POINTER").and_then(|v| {
-            let (x, y) = v.split_once(',')?;
-            Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
-        }) {
-            raw.events.retain(|e| !matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerGone));
-            raw.events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
-        }
     }
 
     /// egui's memory is ~200 KB of scroll offsets and text cursors, written every 30 s
@@ -2274,6 +2287,9 @@ impl eframe::App for App {
         storage.set_string("album_accent_comp", b(self.album_accent_comp));
         storage.set_string("accent_controls", b(self.accent_controls));
         storage.set_string("anim_bg", b(self.anim_bg));
+        storage.set_string("queue_width", format!("{:.0}", self.queue_w));
+        storage.set_string("bg_speed", format!("{:.2}", self.bg_speed));
+        storage.set_string("bg_brightness", format!("{:.2}", self.bg_brightness));
         storage.set_string("glass_on", b(self.glass_on));
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("dim_bright", b(self.dim_bright));
@@ -2495,8 +2511,8 @@ fn too_big(size: egui::Vec2, monitor: egui::Vec2) -> bool {
     size.x > monitor.x + 24.0 || size.y > monitor.y + 24.0
 }
 
-/// Whether this is the installed or the portable app, or the .deb or the Arch package
-/// (which only say a new version is out): updates only apply there. It
+/// Whether this is the installed or the portable app, or the .deb, the Arch package or
+/// a Flatpak (which only say a new version is out): updates only apply there. It
 /// can't change while running, and the check touches the disk, so it runs once.
 fn updatable() -> bool {
     static UPDATABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

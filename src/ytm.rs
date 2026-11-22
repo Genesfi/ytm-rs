@@ -269,15 +269,54 @@ pub struct Suggestion {
     pub forget: Option<String>,
 }
 
-/// Search terms for `input`. Signed in, the account's matching past searches come
-/// first, and an empty `input` gives just those (its recent searches).
-pub async fn suggestions(api: &Api, input: &str, auth: bool) -> anyhow::Result<Vec<Suggestion>> {
+/// Search terms for `input`, and the songs, videos, artists and albums it most likely
+/// means. Signed in, the account's matching past searches come first, and an empty
+/// `input` gives just those (its recent searches).
+pub async fn suggestions(api: &Api, input: &str, auth: bool) -> anyhow::Result<(Vec<Suggestion>, Vec<Card>)> {
     let v = api.call("music/get_search_suggestions", json!({ "input": input }), auth).await?;
-    Ok(parse_suggestions(&v))
+    Ok((parse_suggestions(&v), parse_suggested_hits(&v)))
+}
+
+/// The answer's second section: what the typed words most likely mean, as rows.
+fn parse_suggested_hits(v: &Value) -> Vec<Card> {
+    parse_suggested_hits_with(v, podcasts())
+}
+
+/// [`parse_suggested_hits`], with podcasts shown or not.
+fn parse_suggested_hits_with(v: &Value, podcasts: bool) -> Vec<Card> {
+    arr(&v["contents"][1]["searchSuggestionsSectionRenderer"]["contents"]).iter().filter_map(|i| suggested_hit(&i["musicResponsiveListItemRenderer"], podcasts)).collect()
+}
+
+/// An artist or album opens its page; a song, video or episode plays. Episodes only
+/// with podcasts shown, by their show as search results have them.
+fn suggested_hit(r: &Value, podcasts: bool) -> Option<Card> {
+    if let Some(c) = list_card(r) {
+        return Some(c);
+    }
+    let detail = &r["flexColumns"][1]["musicResponsiveListItemFlexColumnRenderer"]["text"];
+    let subtitle = || runs(detail).filter_map(|r| r["text"].as_str()).collect::<String>();
+    // An episode names its show where a song names its artists.
+    if !show_links(detail).is_empty() {
+        let t = episode_row(r).filter(|_| podcasts)?;
+        return Some(Card { title: t.title.clone(), subtitle: subtitle(), thumbs: t.thumbs.clone(), round: false, links: t.artists.clone(), target: Target::Song(t) });
+    }
+    let mut t = list_item(r)?;
+    // These rows lead with their kind ("Song • Daft Punk • 401M plays"), in the language
+    // asked for: not an artist, whatever it's called.
+    let mut lead = runs(detail);
+    if let (Some(kind), Some(dot)) = (lead.next(), lead.next())
+        && kind["navigationEndpoint"].is_null()
+        && dot["text"].as_str().is_some_and(|s| s.trim() == "•")
+    {
+        let kind = kind["text"].as_str().unwrap_or_default();
+        if t.artists.first().is_some_and(|a| a.id.is_none() && a.name == kind) {
+            t.artists.remove(0);
+        }
+    }
+    Some(Card { title: t.title.clone(), subtitle: subtitle(), thumbs: t.thumbs.clone(), round: false, links: t.artists.clone(), target: Target::Song(t) })
 }
 
 fn parse_suggestions(v: &Value) -> Vec<Suggestion> {
-    // A second section holds songs and artists, which the dropdown doesn't show.
     let items = &v["contents"][0]["searchSuggestionsSectionRenderer"]["contents"];
     arr(items)
         .iter()
@@ -729,9 +768,19 @@ pub async fn playlist(api: &Api, id: &str, auth: bool, limit: Option<usize>) -> 
     Ok(pl)
 }
 
+/// The songs saved to the library, as Library › Songs lists them on the website: liked
+/// ones, and the songs of albums and playlists saved there too. Loaded and kept like a
+/// playlist, under this id.
+pub const LIBRARY_SONGS: &str = "FEmusic_liked_videos";
+
 /// A playlist's first page (about 100 songs), the next page's token, and how many
 /// songs to stop at: `limit` (`None`: all), or fewer when a mix's header says so.
 pub async fn playlist_start(api: &Api, id: &str, auth: bool, limit: Option<usize>) -> anyhow::Result<(Collection, Option<String>, usize)> {
+    if id == LIBRARY_SONGS {
+        let v = api.call_signed_in("browse", json!({ "browseId": LIBRARY_SONGS })).await?;
+        let (c, token) = parse_library_songs(&v);
+        return Ok((c, token, limit.unwrap_or(usize::MAX)));
+    }
     // A podcast show's own page lists its episodes; a playlist's is "VL" and its id.
     let browse = if id.starts_with(SHOW_PREFIX) { id.to_owned() } else { format!("VL{id}") };
     let v = api.call("browse", json!({ "browseId": browse }), auth).await?;
@@ -748,6 +797,31 @@ pub async fn playlist_start(api: &Api, id: &str, auth: bool, limit: Option<usize
     pl.tracks.truncate(limit);
     pl.set_ids.truncate(limit);
     Ok((pl, token, limit))
+}
+
+/// Library › Songs' first page (a "Shuffle all" row, then the songs) and the next page's
+/// token; the later pages continue as a playlist's do. None saved yet: no songs.
+fn parse_library_songs(v: &Value) -> (Collection, Option<String>) {
+    let sections = arr(&v["contents"]["singleColumnBrowseResultsRenderer"]["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"]);
+    let shelf = sections.iter().map(|s| &s["musicShelfRenderer"]).find(|s| !s.is_null());
+    let (tracks, set_ids, token) = shelf.map(|s| list_page(arr(&s["contents"]))).unwrap_or_default();
+    let token = token.or_else(|| shelf.and_then(continuation));
+    let c = Collection {
+        id: LIBRARY_SONGS.to_owned(),
+        is_album: false,
+        save_id: None,
+        title: String::new(),
+        subtitle: String::new(),
+        artists: Vec::new(),
+        description: None,
+        thumbs: Vec::new(),
+        tracks,
+        set_ids,
+        count: None,
+        owned: false,
+        sorts: Vec::new(),
+    };
+    (c, token)
 }
 
 /// The playlist page after `token`: its songs, their entry ids, and the next token.
@@ -2554,6 +2628,100 @@ mod tests {
                 Suggestion { text: "love songs".into(), forget: None },
             ]
         );
+    }
+
+    #[test]
+    fn library_songs_list_the_songs_saved_there() {
+        // Shaped like a signed-in FEmusic_liked_videos answer (November 2026): a "Shuffle
+        // all" row before the songs, and the next page's token on the shelf.
+        let col = |runs: Value| json!({"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": runs}}});
+        let browse = |id: &str, kind: &str| json!({"browseEndpoint": {"browseId": id, "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": kind}}}});
+        let watch = json!({"watchEndpoint": {"videoId": "JhulBGMA7G4", "playlistId": "MLCT", "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": "MUSIC_VIDEO_TYPE_ATV"}}}});
+        let song = json!({"musicResponsiveListItemRenderer": {
+            "flexColumns": [
+                col(json!([{"text": "Harder, Better, Faster, Stronger", "navigationEndpoint": watch}])),
+                col(json!([{"text": "Daft Punk", "navigationEndpoint": browse("UC_kRDKYrUlrbtrSiyu5Tflg", "MUSIC_PAGE_TYPE_ARTIST")}])),
+                col(json!([{"text": "Discovery", "navigationEndpoint": browse("MPREb_GDfJeO4t1sl", "MUSIC_PAGE_TYPE_ALBUM")}])),
+            ],
+            "fixedColumns": [{"musicResponsiveListItemFixedColumnRenderer": {"text": {"runs": [{"text": "3:45"}]}}}],
+        }});
+        let shuffle = json!({"musicResponsiveListItemRenderer": {
+            "flexColumns": [col(json!([{"text": "Shuffle all"}]))],
+            "navigationEndpoint": {"watchPlaylistEndpoint": {"playlistId": "MLCT", "params": "wAEB8gECKAE%3D"}},
+        }});
+        let page = |shelf: Value| json!({"contents": {"singleColumnBrowseResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [shelf]}}}}]}}});
+        let v = page(json!({"musicShelfRenderer": {"contents": [shuffle, song], "continuations": [{"nextContinuationData": {"continuation": "next-page"}}]}}));
+        let (c, token) = parse_library_songs(&v);
+        assert_eq!(c.id, LIBRARY_SONGS);
+        assert!(!c.owned && !c.is_album);
+        assert_eq!(c.tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Harder, Better, Faster, Stronger"]);
+        let t = &c.tracks[0];
+        assert_eq!((t.id.as_str(), t.artist_line().as_str(), t.duration), ("JhulBGMA7G4", "Daft Punk", Some(225)));
+        assert_eq!(t.album.as_ref().map(|a| a.name.as_str()), Some("Discovery"));
+        assert_eq!(c.set_ids.len(), c.tracks.len());
+        assert_eq!(token.as_deref(), Some("next-page"));
+        // The later pages continue as a playlist's do.
+        let more = json!({"continuationContents": {"musicShelfContinuation": {"contents": [song]}}});
+        let (tracks, _, next) = playlist_continuation(&more);
+        assert_eq!((tracks.len(), next), (1, None));
+        // Nothing saved yet: a message where the shelf would be, and no songs.
+        let (c, token) = parse_library_songs(&page(json!({"itemSectionRenderer": {"contents": [{"messageRenderer": {}}]}})));
+        assert!(c.tracks.is_empty() && token.is_none());
+    }
+
+    #[test]
+    fn suggestions_offer_the_songs_artists_and_albums_they_mean() {
+        // Trimmed from get_search_suggestions answers to "daft punk" and "random access
+        // memories" (November 2026).
+        let browse = |id: &str, kind: &str| json!({"browseEndpoint": {"browseId": id, "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": kind}}}});
+        let col = |runs: Value| json!({"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": runs}}});
+        let thumb = json!({"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [{"url": "https://lh3.googleusercontent.com/qLhu6P", "width": 60, "height": 60}]}}});
+        let daft = browse("UCRr1xG_2WIDs18a6cIiCxeA", "MUSIC_PAGE_TYPE_ARTIST");
+        let artist = json!({"musicResponsiveListItemRenderer": {"thumbnail": thumb, "navigationEndpoint": daft,
+            "flexColumns": [col(json!([{"text": "Daft Punk"}])), col(json!([{"text": "65.2M monthly audience"}]))]}});
+        let song = |kind: &str, id: &str, title: &str, count: &str| {
+            let watch = json!({"watchEndpoint": {"videoId": id, "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": "MUSIC_VIDEO_TYPE_ATV"}}}});
+            json!({"musicResponsiveListItemRenderer": {"thumbnail": thumb, "navigationEndpoint": watch, "playlistItemData": {"videoId": id},
+                "flexColumns": [col(json!([{"text": title, "navigationEndpoint": watch}])),
+                    col(json!([{"text": kind}, {"text": " • "}, {"text": "Daft Punk", "navigationEndpoint": daft}, {"text": " • "}, {"text": count}]))]}})
+        };
+        let album = json!({"musicResponsiveListItemRenderer": {"thumbnail": thumb, "navigationEndpoint": browse("MPREb_ram", "MUSIC_PAGE_TYPE_ALBUM"),
+            "flexColumns": [col(json!([{"text": "Random Access Memories"}])),
+                col(json!([{"text": "Album"}, {"text": " • "}, {"text": "Daft Punk", "navigationEndpoint": daft}, {"text": " • "}, {"text": "2013"}]))]}});
+        let answer = |rows: Vec<Value>| json!({"contents": [
+            {"searchSuggestionsSectionRenderer": {"contents": [{"searchSuggestionRenderer": {"suggestion": {"runs": [{"text": "daft punk"}]}}}]}},
+            {"searchSuggestionsSectionRenderer": {"contents": rows}}
+        ]});
+        let hits = parse_suggested_hits(&answer(vec![artist, song("Song", "JhulBGMA7G4", "Harder, Better, Faster, Stronger", "401M plays"), album]));
+        let shown: Vec<_> = hits.iter().map(|c| (c.title.as_str(), c.subtitle.as_str(), c.round)).collect();
+        assert_eq!(
+            shown,
+            [("Daft Punk", "65.2M monthly audience", true), ("Harder, Better, Faster, Stronger", "Song • Daft Punk • 401M plays", false), ("Random Access Memories", "Album • Daft Punk • 2013", false)]
+        );
+        assert!(matches!(&hits[0].target, Target::Artist(id) if id == "UCRr1xG_2WIDs18a6cIiCxeA"));
+        assert!(matches!(&hits[2].target, Target::Album(id) if id == "MPREb_ram"));
+        let Target::Song(t) = &hits[1].target else { panic!("a song plays") };
+        assert_eq!((t.id.as_str(), t.artist_line().as_str()), ("JhulBGMA7G4", "Daft Punk"));
+        assert!(!hits[0].thumbs.is_empty() && !t.thumbs.is_empty());
+        // In another language the kind is no artist either.
+        let hits = parse_suggested_hits(&answer(vec![song("Canción", "wU26xVT_vBU", "One More Time", "860 M de reproducciones")]));
+        let Target::Song(t) = &hits[0].target else { panic!("a song plays") };
+        assert_eq!(t.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Daft Punk"]);
+        // An episode plays by its show, and only with podcasts shown.
+        let show = browse("MPSPPL1", "MUSIC_PAGE_TYPE_PODCAST_SHOW_DETAIL_PAGE");
+        let watch = json!({"watchEndpoint": {"videoId": "xjZ31IKfu4Q"}});
+        let episode = json!({"musicResponsiveListItemRenderer": {"thumbnail": thumb, "navigationEndpoint": watch, "playlistItemData": {"videoId": "xjZ31IKfu4Q"},
+            "flexColumns": [col(json!([{"text": "The Buried Bodies Case", "navigationEndpoint": watch}])),
+                col(json!([{"text": "Episode"}, {"text": " • "}, {"text": "Dec 28, 2025"}, {"text": " • "}, {"text": "Radiolab", "navigationEndpoint": show}]))]}});
+        let rows = || answer(vec![episode.clone(), song("Song", "JhulBGMA7G4", "Harder, Better, Faster, Stronger", "401M plays")]);
+        let off = parse_suggested_hits_with(&rows(), false);
+        assert_eq!(off.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Harder, Better, Faster, Stronger"]);
+        let on = parse_suggested_hits_with(&rows(), true);
+        assert_eq!(on.len(), 2);
+        let Target::Song(t) = &on[0].target else { panic!("an episode plays") };
+        assert_eq!((t.id.as_str(), t.artist_line().as_str()), ("xjZ31IKfu4Q", "Radiolab"));
+        // Recent searches, with nothing typed, have no second section.
+        assert!(parse_suggested_hits(&json!({"contents": [{"searchSuggestionsSectionRenderer": {"contents": []}}]})).is_empty());
     }
 
     #[test]

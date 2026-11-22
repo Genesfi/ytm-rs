@@ -230,9 +230,12 @@ impl App {
                     self.suggest_due = Some(now);
                 }
             }
-            Resp::Suggest { query, round, terms } => {
+            Resp::Suggest { query, round, terms, mut hits } => {
                 if round == self.suggest_round && self.search_text.trim() == query {
-                    self.suggestions = (query, terms);
+                    // Explicit songs stay out while those are hidden. (Episodes come only
+                    // with podcasts shown: see `ytm::suggestions`.)
+                    hits.retain(|c| !matches!(&c.target, Target::Song(t) if self.hide_explicit && t.explicit));
+                    self.suggestions = (query, terms, hits);
                     self.suggest_sel = None;
                 }
             }

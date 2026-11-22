@@ -217,6 +217,27 @@ pub enum Weight {
     ExtraBold,
 }
 
+impl Weight {
+    /// Lightest first, as Settings › Lyrics › Line weight lists them.
+    pub const ALL: [Weight; 6] = [Weight::Light, Weight::Regular, Weight::Medium, Weight::Semibold, Weight::Bold, Weight::ExtraBold];
+
+    /// Its name in the theme files, and in the settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            Weight::Light => "light",
+            Weight::Regular => "regular",
+            Weight::Medium => "medium",
+            Weight::Semibold => "semibold",
+            Weight::Bold => "bold",
+            Weight::ExtraBold => "extra_bold",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Weight> {
+        Weight::ALL.into_iter().find(|w| w.key() == key)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Fill {
@@ -312,7 +333,6 @@ impl Default for LetterWave {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LyricStyle {
-    pub align: Align,
     pub agent_align: AgentAlign,
     pub weight: Weight,
     pub font: String,
@@ -362,8 +382,7 @@ pub struct LyricStyle {
     pub active_blur_transition: Option<Timing>,
     /// The next line goes sharp and full this long before it's sung (`.blyrics--pre-animating`).
     pub pre_sharp_secs: f32,
-    /// The sung line's opacity, word-timed and line-timed.
-    pub active_opacity: f32,
+    /// The sung line's opacity on line-timed lyrics (word-timed ones are fully opaque).
     pub active_opacity_line_synced: Option<f32>,
     /// Line opacity while the reader scrolls.
     pub scroll_opacity: f32,
@@ -429,17 +448,6 @@ pub struct LyricStyle {
     /// Background vocals' opacity against the line, and their weight.
     pub background_alpha: f32,
     pub background_weight: Weight,
-    pub romanization_rem: f32,
-    pub romanization_alpha: f32,
-    pub romanization_pill: bool,
-    pub romanization_weight: Weight,
-    pub romanization_font: String,
-    pub translation_rem: f32,
-    pub translation_alpha: f32,
-    pub translation_weight: Weight,
-    pub translation_font: String,
-    /// Sizes when a line has both, rem: `[romanization, translation]`.
-    pub both_rem: Option<[f32; 2]>,
     pub instrumental: Instrumental,
     /// The break's icon, rem across.
     pub instrumental_rem: Option<f32>,
@@ -463,8 +471,6 @@ pub struct LyricStyle {
     pub marker_px: Option<[f32; 4]>,
     /// Sung lines slide away: `[distance rem (negative: left), secs]`.
     pub line_exit: Option<[f32; 2]>,
-    /// Romanization, translation and credits: letter spacing, em.
-    pub decor_tracking_em: f32,
     /// Lit words fading back when their line ends: `[secs, delay]`.
     pub exit_fade: Option<[f32; 2]>,
     /// A glow colour per singer, v1 first.
@@ -482,19 +488,14 @@ pub struct LyricStyle {
     pub column_overlays: Vec<Overlay>,
     /// Colour in lines not being sung, against full (`filter: saturate`).
     pub rest_saturate: f32,
-    /// How long lines above and below the active one take to scroll, against the usual.
-    pub scroll_sides: [f32; 2],
     /// How long each line takes to scroll by how far it is from the sung one `i`, in ms:
     /// `[above, above log, below, below log, below step]`, as `above + ln(i + 1) * above log`
-    /// and `below + ln(i + 1) * below log + i * below step`. Replaces `scroll_secs` and
-    /// `scroll_sides`.
+    /// and `below + ln(i + 1) * below log + i * below step`. Replaces `scroll_secs`.
     pub scroll_curve: Option<[f32; 5]>,
     /// Line-timed lyrics: each word this much after the last, seconds.
     pub line_stagger: f32,
     /// Songs whose lyrics are nothing but an instrumental break show as having none.
     pub hide_instrumental_only: bool,
-    /// Romanization and translation coming in: `[em down, em across, secs, delay]`.
-    pub deco_enter: Option<[f32; 4]>,
     /// The sweep's soft edge, in words, and where its two ends finish.
     pub sweep_soft: Option<f32>,
     pub sweep_end: Option<[f32; 2]>,
@@ -514,9 +515,6 @@ pub struct LyricStyle {
     /// The word shadow's spread against the usual; none on words already lit.
     pub word_shadow_blur: f32,
     pub word_shadow_unsung: bool,
-    /// Romanization and translation bigger in full screen; em between them and the line.
-    pub decor_fullscreen_scale: f32,
-    pub decor_gap_em: Option<f32>,
     /// `padding-inline: clamp(min px, vw %, max px)`, in place of `padding_inline`.
     pub padding_vw: Option<[f32; 3]>,
     /// `padding-block: clamp(min px, vh %, max px)` on lines, in place of `line_padding_rem`.
@@ -553,16 +551,8 @@ pub struct LyricStyle {
     pub hover_glow_sung_only: bool,
     /// Hovering the panel at all reveals every line, as scrolling does.
     pub panel_reveal: bool,
-    /// Romanization and translation on the sung line, alpha.
-    pub decor_active_alpha: Option<f32>,
-    /// Their size as a share of the line's, in place of rem.
-    pub decor_em: Option<f32>,
-    /// Their line height.
-    pub decor_line_height: Option<f32>,
     /// Background vocals while they're being sung, against the line's: alpha.
     pub background_lit_alpha: Option<f32>,
-    /// A translation comes in this much after a romanization, seconds.
-    pub translation_delay: f32,
     /// A sung line leaving goes toward its own side.
     pub line_exit_by_side: bool,
     /// A line turning active sharpens from this blur, in place of its resting one.
@@ -576,7 +566,6 @@ pub struct LyricStyle {
     pub resume_text_px: Option<f32>,
     pub resume_black: bool,
     pub resume_shadow: Option<[f32; 3]>,
-    pub resume_offset: [f32; 2],
     /// In full screen, the Resume Autoscroll button's own spot: `[px from the lyrics' left,
     /// fraction of their height down]`.
     pub resume_fullscreen: Option<[f32; 2]>,
@@ -590,7 +579,6 @@ pub struct LyricStyle {
 impl Default for LyricStyle {
     fn default() -> Self {
         Self {
-            align: Align::Left,
             agent_align: AgentAlign::Stock,
             weight: Weight::Bold,
             font: "inter".into(),
@@ -622,7 +610,6 @@ impl Default for LyricStyle {
             active_opacity_transition: None,
             active_blur_transition: None,
             pre_sharp_secs: 0.0,
-            active_opacity: 1.0,
             active_opacity_line_synced: None,
             scroll_opacity: 1.0,
             scroll_scale: None,
@@ -664,16 +651,6 @@ impl Default for LyricStyle {
             background_em: 0.75,
             background_alpha: 0.78,
             background_weight: Weight::Semibold,
-            romanization_rem: 1.6,
-            romanization_alpha: 0.6,
-            romanization_pill: true,
-            romanization_weight: Weight::Semibold,
-            romanization_font: String::new(),
-            translation_rem: 2.0,
-            translation_alpha: 0.6,
-            translation_weight: Weight::Semibold,
-            translation_font: String::new(),
-            both_rem: None,
             instrumental: Instrumental::Note,
             instrumental_rem: None,
             instrumental_breathe: None,
@@ -686,7 +663,6 @@ impl Default for LyricStyle {
             aura: None,
             marker_px: None,
             line_exit: None,
-            decor_tracking_em: 0.0,
             exit_fade: None,
             agent_glow: Vec::new(),
             aura_colors: Vec::new(),
@@ -696,11 +672,9 @@ impl Default for LyricStyle {
             hover_glow: None,
             column_overlays: Vec::new(),
             rest_saturate: 1.0,
-            scroll_sides: [1.0, 1.0],
             scroll_curve: None,
             line_stagger: 0.05,
             hide_instrumental_only: false,
-            deco_enter: None,
             sweep_soft: None,
             sweep_end: None,
             hover_dim_alpha: None,
@@ -713,8 +687,6 @@ impl Default for LyricStyle {
             background_sung_alpha: None,
             word_shadow_blur: 1.0,
             word_shadow_unsung: false,
-            decor_fullscreen_scale: 1.0,
-            decor_gap_em: None,
             padding_vw: None,
             line_padding_vh: None,
             padding_top: 0.0,
@@ -734,11 +706,7 @@ impl Default for LyricStyle {
             hover_unsung_alpha: None,
             hover_glow_sung_only: false,
             panel_reveal: false,
-            decor_active_alpha: None,
-            decor_em: None,
-            decor_line_height: None,
             background_lit_alpha: None,
-            translation_delay: 0.0,
             line_exit_by_side: false,
             active_blur_from: None,
             marker_colors_alt: Vec::new(),
@@ -747,7 +715,6 @@ impl Default for LyricStyle {
             resume_text_px: None,
             resume_black: false,
             resume_shadow: None,
-            resume_offset: [0.0, 0.0],
             resume_fullscreen: None,
             scroll_secs: 0.75,
             scroll_ease: [0.86, 0.0, 0.2, 1.0],
@@ -819,7 +786,6 @@ pub struct CoverStyle {
     pub shadow: f32,
     pub shadow_blur: f32,
     pub shadow_offset: f32,
-    pub glow: f32,
     /// `[px, white alpha]`.
     pub outline: [f32; 2],
     /// The cover's own opacity.
@@ -920,7 +886,6 @@ impl Default for CoverStyle {
             shadow: 0.0,
             shadow_blur: 60.0,
             shadow_offset: 0.0,
-            glow: 0.0,
             outline: [0.0, 0.0],
             opacity: 1.0,
             max_frac: None,
@@ -1081,13 +1046,11 @@ pub struct SwitchLook {
     pub shadow: Option<[f32; 3]>,
     /// In the bottom corner rather than in the header.
     pub at_corner: bool,
-    /// Moved down, px.
-    pub y_offset: f32,
     /// In the corner, the right one.
     pub at_right: bool,
     /// Song and Video as plain words, the selected one over `selected`.
     pub plain: bool,
-    /// Moved down in full screen, in place of `y_offset`.
+    /// Moved down in full screen, px.
     pub y_offset_full: Option<f32>,
 }
 
@@ -1454,8 +1417,6 @@ pub struct AppStyle {
     pub accent_controls: bool,
     /// Pages sit on a layered sheet over the background: its white alpha and top-left radius.
     pub sheet: Option<[f32; 2]>,
-    /// Glass panels frost the background art behind them.
-    pub frost: bool,
     /// Every weight of interface text in bold.
     pub all_bold: bool,
     pub controls: Controls,
@@ -1477,8 +1438,6 @@ pub struct AppStyle {
     /// A wash down from the top of the pages: `[colour alpha, px]`, in `page_wash_color`.
     pub page_wash: Option<[f32; 2]>,
     pub page_wash_color: String,
-    /// The same, up from the bottom of the window: `[black alpha, px]`.
-    pub page_foot: Option<[f32; 2]>,
     /// New pages rise this many px as they fade in.
     pub page_rise_px: f32,
     /// Album and playlist pages open under their art, at this opacity, fading out down the header.
@@ -1516,8 +1475,6 @@ pub struct AppStyle {
     pub page_saturation: Option<f32>,
     pub page_contrast: f32,
     pub page_scale: Option<f32>,
-    /// A wash across the pages from the left: `[colour alpha, px]`, in `page_wash_color`.
-    pub page_side: Option<[f32; 2]>,
     /// New pages slide up from this far on opening now playing... and a plain fade if 0.
     pub np_open_secs: f32,
     /// The main text colour on dark pages.
@@ -1609,8 +1566,6 @@ pub struct Controls {
     /// White alpha of a button, added on hover.
     pub button_fill: f32,
     pub button_hover: f32,
-    /// The colour icons take on hover; empty: the text colour.
-    pub hover_color: String,
     /// The Play pill in the accent.
     pub accent_primary: bool,
     /// White alpha of an outline on hover, and of a fill while pressed.
@@ -1624,7 +1579,6 @@ pub struct Controls {
     pub press_rows: f32,
     /// The bar's play button on hover.
     pub play_hover_scale: f32,
-    pub play_hover_color: String,
     /// How keyboard focus shows.
     pub focus: Option<FocusRing>,
     /// Interface motion overshoots slightly.
@@ -1633,7 +1587,7 @@ pub struct Controls {
 
 impl Default for Controls {
     fn default() -> Self {
-        Self { idle_alpha: 1.0, ghost_outline: 0.0, press_scale: 0.9, hover_scale: 1.0, arrow_hover: None, button_fill: 0.10, button_hover: 0.08, hover_color: String::new(), accent_primary: false, hover_border: 0.0, press_fill: 0.0, shadow: None, press_cards: 1.0, press_chips: 1.0, press_rows: 1.0, play_hover_scale: 1.05, play_hover_color: String::new(), focus: None, spring: false }
+        Self { idle_alpha: 1.0, ghost_outline: 0.0, press_scale: 0.9, hover_scale: 1.0, arrow_hover: None, button_fill: 0.10, button_hover: 0.08, accent_primary: false, hover_border: 0.0, press_fill: 0.0, shadow: None, press_cards: 1.0, press_chips: 1.0, press_rows: 1.0, play_hover_scale: 1.05, focus: None, spring: false }
     }
 }
 
@@ -1652,8 +1606,6 @@ pub struct NavItem {
     pub rail_px: f32,
     /// Labels under the rail's icons.
     pub rail_labels: bool,
-    /// Playlists as one line of text at this height, without art.
-    pub title_rows: Option<f32>,
     /// The sidebar's width, px, in place of the usual.
     pub width: Option<f32>,
     /// White alpha while pressed.
@@ -1662,8 +1614,6 @@ pub struct NavItem {
     pub hide_divider: bool,
     /// The sidebar's fill only once the page has scrolled.
     pub scroll_fill: bool,
-    /// The selected entry's colour in place of white.
-    pub selected_color: String,
     /// `selected` on now playing's bar... and over a page, as it differs.
     pub side_margin: f32,
     /// A heading over the playlists, in place of PLAYLISTS, and whether it has a + for a new one.
@@ -1683,7 +1633,7 @@ pub struct NavItem {
 
 impl Default for NavItem {
     fn default() -> Self {
-        Self { radius: None, height: 42.0, hover: 0.05, selected: 0.10, slide: 0.0, rail: false, rail_px: 76.0, rail_labels: false, title_rows: None, width: None, press: 0.0, hide_divider: false, scroll_fill: false, selected_color: String::new(), side_margin: 0.0, playlists_label: String::new(), playlists_plus: false, cover_tint: None, selected_fill: String::new(), bar_px: 20.0, rail_height: None, hover_zoom: 1.0 }
+        Self { radius: None, height: 42.0, hover: 0.05, selected: 0.10, slide: 0.0, rail: false, rail_px: 76.0, rail_labels: false, width: None, press: 0.0, hide_divider: false, scroll_fill: false, side_margin: 0.0, playlists_label: String::new(), playlists_plus: false, cover_tint: None, selected_fill: String::new(), bar_px: 20.0, rail_height: None, hover_zoom: 1.0 }
     }
 }
 
@@ -1849,8 +1799,6 @@ pub struct MenuLook {
     pub separator: f32,
     /// Narrowest, px.
     pub min_px: f32,
-    /// Hovered rows' icon and text take the accent.
-    pub hover_accent: bool,
     /// Hovered rows' icon and text slide this far, px.
     pub row_slide: f32,
     /// Dialogs' alpha, where it differs from a menu's.
@@ -1859,7 +1807,7 @@ pub struct MenuLook {
 
 impl Default for MenuLook {
     fn default() -> Self {
-        Self { row_px: 36.0, hover: 0.12, alpha: 1.0, icon_right: false, shadow: None, row_radius: 7.0, pop: None, item_slide: 0.0, separator: 0.0, min_px: 260.0, hover_accent: false, row_slide: 0.0, dialog_alpha: None }
+        Self { row_px: 36.0, hover: 0.12, alpha: 1.0, icon_right: false, shadow: None, row_radius: 7.0, pop: None, item_slide: 0.0, separator: 0.0, min_px: 260.0, row_slide: 0.0, dialog_alpha: None }
     }
 }
 
@@ -1879,8 +1827,6 @@ pub struct SearchLook {
     /// Its colour while its suggestions are open, and its bottom corners square then, with them attached.
     pub open_color: String,
     pub attached: bool,
-    /// A second outline around it, `[radius, white alpha]`.
-    pub outer: Option<[f32; 2]>,
     /// Focused: a line along its bottom in `focus_color` rather than an outline.
     pub underline: bool,
     /// The list's outline in white alpha, and its rows' radius.
@@ -1894,7 +1840,7 @@ pub struct SearchLook {
 
 impl Default for SearchLook {
     fn default() -> Self {
-        Self { height: 42.0, max_px: 560.0, color: String::new(), focus_color: String::new(), focus_ring: 0.0, drop_radius: None, accent_icon: false, open_color: String::new(), attached: false, outer: None, underline: false, drop_ring: 0.0, item_radius: 8.0, drop_grow: false, drop_alpha: None }
+        Self { height: 42.0, max_px: 560.0, color: String::new(), focus_color: String::new(), focus_ring: 0.0, drop_radius: None, accent_icon: false, open_color: String::new(), attached: false, underline: false, drop_ring: 0.0, item_radius: 8.0, drop_grow: false, drop_alpha: None }
     }
 }
 
@@ -1981,7 +1927,6 @@ impl Default for AppStyle {
             hide_scrollbars: false,
             accent_controls: false,
             sheet: None,
-            frost: false,
             all_bold: false,
             controls: Controls::default(),
             nav_item: NavItem::default(),
@@ -1999,7 +1944,6 @@ impl Default for AppStyle {
             strap_alpha: 1.0,
             page_wash: None,
             page_wash_color: String::new(),
-            page_foot: None,
             page_rise_px: 0.0,
             immersive_header: None,
             header_title_px: 40.0,
@@ -2021,7 +1965,6 @@ impl Default for AppStyle {
             page_saturation: None,
             page_contrast: 1.0,
             page_scale: None,
-            page_side: None,
             np_open_secs: 0.42,
             text_color: String::new(),
             ui_fade_secs: None,
@@ -2205,24 +2148,6 @@ mod tests {
         }
     }
 
-    /// Romanization and translation are drawn from the app's own theme in every theme, so
-    /// no other theme sets them: nothing would read it.
-    #[test]
-    fn only_the_default_theme_styles_romanization_and_translation() {
-        const KEYS: &[&str] = &[
-            "romanization_rem", "romanization_alpha", "romanization_pill", "romanization_weight", "romanization_font",
-            "translation_rem", "translation_alpha", "translation_weight", "translation_font", "translation_delay",
-            "both_rem", "deco_enter", "decor_tracking_em", "decor_fullscreen_scale", "decor_gap_em",
-            "decor_active_alpha", "decor_em", "decor_line_height",
-        ];
-        for (file, json) in FILES.iter().filter(|(file, _)| *file != DEFAULT_ID) {
-            let v: serde_json::Value = serde_json::from_str(json).unwrap();
-            for key in KEYS {
-                assert!(v["lyrics"].get(key).is_none(), "{file}: lyrics.{key} is only read from {DEFAULT_ID}");
-            }
-        }
-    }
-
     /// No theme gets a feature by name: nothing outside this file's tests looks at an id.
     #[test]
     fn nothing_branches_on_a_theme() {
@@ -2243,6 +2168,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A weight's settings key reads back as the same weight, and as the theme files spell it.
+    #[test]
+    fn weight_keys_round_trip() {
+        for w in Weight::ALL {
+            assert!(Weight::from_key(w.key()) == Some(w));
+            assert!(serde_json::from_str::<Weight>(&format!("\"{}\"", w.key())).ok() == Some(w));
+        }
+        assert!(Weight::from_key("").is_none());
     }
 
     #[test]

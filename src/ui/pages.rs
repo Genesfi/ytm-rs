@@ -333,6 +333,7 @@ fn sort_options(page: &Page) -> Vec<(Sort, &'static str)> {
         Page::Playlist(id) if id == super::LIKED_MUSIC => (crate::tr!("ui-recently-liked"), true),
         Page::Playlist(_) => (crate::tr!("ui-custom-order"), false),
         Page::Library(LibTab::Songs) => (crate::tr!("ui-recently-liked"), true),
+        Page::Library(LibTab::Saved) => (crate::tr!("ui-recently-added"), true),
         Page::Library(LibTab::History) => (crate::tr!("ui-recently-played"), true),
         Page::Library(LibTab::Uploads) => (crate::tr!("ui-recently-added"), true),
         Page::Library(LibTab::Downloads) => (crate::tr!("ui-newest-first"), true),
@@ -412,6 +413,7 @@ fn selectable<'a>(app: &'a App, page: &Page) -> Option<(&'a [Track], bool)> {
             app.opened(id).map(|o| &o.c).map(|c| (c.tracks.as_slice(), app.logged_in && c.owned && !c.is_album))
         }
         Page::Library(LibTab::Songs) => app.opened(super::LIKED_MUSIC).map(|o| (o.c.tracks.as_slice(), false)),
+        Page::Library(LibTab::Saved) => app.opened(super::LIBRARY_SONGS).map(|o| (o.c.tracks.as_slice(), false)),
         Page::Library(LibTab::History) => app.history.as_deref().map(|h| (h, false)),
         Page::Library(LibTab::Uploads) => app.uploads.as_deref().map(|u| (u, false)),
         Page::Library(LibTab::Downloads) => app.downloads.as_deref().map(|d| (d, false)),
@@ -1474,16 +1476,21 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
             }
             list(ui, &rows, &app.liked, songs, true, plain, ListCtx { sel: &mut app.selection, find: &app.find, drag: &mut app.row_drag, movable: false, page: &app.page, own: false }, &mut app.actions);
         }
-        // Liked Music, kept like any playlist.
-        LibTab::Songs => {
-            if app.opened(super::LIKED_MUSIC).is_none() {
+        // Liked Music, and the songs saved to the library: kept like any playlist.
+        LibTab::Songs | LibTab::Saved => {
+            let id = if tab == LibTab::Songs { super::LIKED_MUSIC } else { super::LIBRARY_SONGS };
+            if app.opened(id).is_none() {
                 placeholder(app, ui, now, 1, 48.0);
                 return;
             }
-            let more = app.receiving(super::LIKED_MUSIC);
-            let Some(o) = app.lists.get(super::LIKED_MUSIC) else { return };
+            let more = app.receiving(id);
+            let Some(o) = app.lists.get(id) else { return };
             app.find.hold(&app.page, !o.complete);
             let liked = &o.c.tracks;
+            if liked.is_empty() && o.complete {
+                ui.add_space(20.0);
+                ui.label(RichText::new(crate::tr!("nav-empty")).color(theme::text_dim()));
+            }
             if !liked.is_empty() {
                 ui.horizontal(|ui| {
                     if pill(ui, crate::tr!("ui-play"), Some(icon::PLAY), true).clicked() {
@@ -1513,7 +1520,7 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
                 LibTab::Albums => &lib.albums,
                 LibTab::Artists => &lib.artists,
                 LibTab::Podcasts => &lib.podcasts,
-                LibTab::Songs | LibTab::History | LibTab::Uploads | LibTab::Downloads => unreachable!(),
+                LibTab::Songs | LibTab::Saved | LibTab::History | LibTab::Uploads | LibTab::Downloads => unreachable!(),
             };
             let page = &app.page;
             ui.horizontal(|ui| {
@@ -2199,15 +2206,35 @@ fn settings_lyrics(app: &mut App, ui: &mut Ui) {
         });
         divider(ui);
         setting_row(ui, tr!("settings-text-size"), Some(tr!("settings-text-size-desc")), |ui| {
-            let (min, max, step) = super::lyric_prefs::TEXT_SCALE;
-            let v = &mut app.lyric_prefs.text_scale;
-            if ui.add_enabled(*v < max - 0.01, egui::Button::new("+").min_size(vec2(28.0, 26.0))).on_hover_text(tr!("settings-larger")).clicked() {
-                *v = ((*v + step) * 10.0).round() / 10.0;
-            }
-            ui.label(egui::RichText::new(format!("{:.0}%", *v * 100.0)).font(theme::semibold(13.0)));
-            if ui.add_enabled(*v > min + 0.01, egui::Button::new("−").min_size(vec2(28.0, 26.0))).on_hover_text(tr!("settings-smaller")).clicked() {
-                *v = ((*v - step) * 10.0).round() / 10.0;
-            }
+            percent_stepper(ui, &mut app.lyric_prefs.text_scale, super::lyric_prefs::TEXT_SCALE, tr!("settings-larger"), tr!("settings-smaller"));
+        });
+        divider(ui);
+        use crate::preset::Weight;
+        let weight_name = |w: Option<Weight>| match w {
+            None => tr!("settings-theme-default"),
+            Some(Weight::Light) => tr!("settings-weight-light"),
+            Some(Weight::Regular) => tr!("settings-weight-regular"),
+            Some(Weight::Medium) => tr!("settings-weight-medium"),
+            Some(Weight::Semibold) => tr!("settings-weight-semibold"),
+            Some(Weight::Bold) => tr!("settings-weight-bold"),
+            Some(Weight::ExtraBold) => tr!("settings-weight-extra-bold"),
+        };
+        setting_row(ui, tr!("settings-line-weight"), Some(tr!("settings-line-weight-desc")), |ui| {
+            let now = app.lyric_prefs.weight;
+            let btn = dropdown_button(ui, weight_name(now), 160.0, tr!("settings-line-weight"));
+            widgets::menu_popup(&btn).show(|ui| {
+                widgets::menu_body(ui, 160.0);
+                for w in std::iter::once(None).chain(Weight::ALL.map(Some)) {
+                    if option_row(ui, weight_name(w), w == now).clicked() {
+                        app.lyric_prefs.weight = w;
+                        ui.close();
+                    }
+                }
+            });
+        });
+        divider(ui);
+        setting_row(ui, tr!("settings-translation-size"), Some(tr!("settings-translation-size-desc")), |ui| {
+            percent_stepper(ui, &mut app.lyric_prefs.deco_scale, super::lyric_prefs::DECO_SCALE, tr!("settings-larger"), tr!("settings-smaller"));
         });
         divider(ui);
         setting_row(ui, tr!("settings-quick-line-changes"), Some(tr!("settings-quick-line-changes-desc")), |ui| {
@@ -2297,6 +2324,20 @@ fn settings_lyrics(app: &mut App, ui: &mut Ui) {
         }
         ui.add_space(6.0);
     });
+}
+
+/// A setting that's a multiple of the theme's own value: + and − by `step` within
+/// `min..=max`, shown as a percentage (100%: the theme's).
+fn percent_stepper(ui: &mut Ui, v: &mut f32, (min, max, step): (f32, f32, f32), more: &str, less: &str) {
+    // In hundredths, so steps land on exact values and 100% is exactly the theme's.
+    let snap = |x: f32| (x * 100.0).round() / 100.0;
+    if ui.add_enabled(*v < max - 0.001, egui::Button::new("+").min_size(vec2(28.0, 26.0))).on_hover_text(more).clicked() {
+        *v = snap(*v + step).min(max);
+    }
+    ui.label(egui::RichText::new(format!("{:.0}%", *v * 100.0)).font(theme::semibold(13.0)));
+    if ui.add_enabled(*v > min + 0.001, egui::Button::new("−").min_size(vec2(28.0, 26.0))).on_hover_text(less).clicked() {
+        *v = snap(*v - step).max(min);
+    }
 }
 
 /// Settings › Appearance and Theme.
@@ -2409,6 +2450,14 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
         divider(ui);
         setting_row(ui, tr!("settings-animated-background"), Some(tr!("settings-animated-background-desc")), |ui| {
             toggle(ui, &mut app.anim_bg, tr!("settings-animated-background"));
+        });
+        divider(ui);
+        setting_row(ui, tr!("settings-background-speed"), Some(tr!("settings-background-speed-desc")), |ui| {
+            percent_stepper(ui, &mut app.bg_speed, super::shell::BG_SPEED, tr!("settings-faster"), tr!("settings-slower"));
+        });
+        divider(ui);
+        setting_row(ui, tr!("settings-background-brightness"), Some(tr!("settings-background-brightness-desc")), |ui| {
+            percent_stepper(ui, &mut app.bg_brightness, super::shell::BG_BRIGHTNESS, tr!("settings-brighter"), tr!("settings-darker"));
         });
         divider(ui);
         setting_row(ui, tr!("settings-frosted-glass"), Some(tr!("settings-frosted-glass-desc")), |ui| {
@@ -2941,29 +2990,33 @@ fn settings_updates(app: &mut App, ui: &mut Ui) {
             ui.add_enabled_ui(installed, |ui| toggle(ui, &mut app.auto_update, tr!("settings-automatic-updates")));
         });
         divider(ui);
-        let desc = tr!("extra-channel-release-desc");
-        setting_row(ui, tr!("settings-update-channel"), Some(desc), |ui| {
-            ui.add_enabled_ui(installed, |ui| {
-                let btn = dropdown_button(ui, if app.update_nightly { tr!("settings-nightly") } else { tr!("settings-stable") }, 140.0, tr!("settings-update-channel"));
-                widgets::menu_popup(&btn).show(|ui| {
-                    widgets::menu_body(ui, 140.0);
-                    for (label, nightly) in [(tr!("settings-stable"), false), (tr!("settings-nightly"), true)] {
-                        if option_row(ui, label, nightly == app.update_nightly).clicked() {
-                            channel = Some(nightly);
-                            ui.close();
+        // A Flatpak gets whichever version Flatpak gives it: there's no channel to pick.
+        if !crate::update::flatpak() {
+            let desc = tr!("extra-channel-release-desc");
+            setting_row(ui, tr!("settings-update-channel"), Some(desc), |ui| {
+                ui.add_enabled_ui(installed, |ui| {
+                    let btn = dropdown_button(ui, if app.update_nightly { tr!("settings-nightly") } else { tr!("settings-stable") }, 140.0, tr!("settings-update-channel"));
+                    widgets::menu_popup(&btn).show(|ui| {
+                        widgets::menu_body(ui, 140.0);
+                        for (label, nightly) in [(tr!("settings-stable"), false), (tr!("settings-nightly"), true)] {
+                            if option_row(ui, label, nightly == app.update_nightly).clicked() {
+                                channel = Some(nightly);
+                                ui.close();
+                            }
                         }
-                    }
+                    });
                 });
             });
-        });
-        divider(ui);
+            divider(ui);
+        }
         setting_row(ui, tr!("settings-status"), Some(&status), |ui| {
             if !installed {
                 return;
             }
             match &state {
                 Some(State::Ready { .. }) => restart = pill(ui, tr!("settings-restart-to-update"), Some(icon::SPARKLES), true).clicked(),
-                Some(State::Available { url, .. }) => {
+                // A Flatpak has nothing to download: Flatpak updates it.
+                Some(State::Available { url, .. }) if !crate::update::flatpak() => {
                     if pill(ui, tr!("settings-download"), Some(icon::SPARKLES), true).clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                     }

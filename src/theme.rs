@@ -217,7 +217,7 @@ impl FileTheme {
 /// the background left for whoever wants flat pages. Nothing looks different until it's
 /// edited.
 pub fn theme_template(accent: Color32) -> String {
-    let hex = |c: Color32| format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
+    let hex = |c: Color32| egui::ecolor::HexColor::Hex6(c).to_string();
     format!(
         "# ytm-rs colours. One \"name = #rrggbb\" on each line.\n\
          # Save the file and the app follows within a couple of seconds: no restart.\n\
@@ -1548,9 +1548,7 @@ pub fn apply_chrome(ctx: &egui::Context, p: &crate::preset::Preset) {
     TEXT_OVER.store(crate::preset::hex(&p.app.text_color).map_or(0, |c| u32::from_le_bytes(c.to_array())), std::sync::atomic::Ordering::Relaxed);
     FADE.store(p.app.ui_fade_secs.map_or(1.0, |s| (s / 0.18).clamp(0.3, 3.0)).to_bits(), std::sync::atomic::Ordering::Relaxed);
     install_style(ctx);
-    // Romanization and translation look the same in every theme: the app's own fonts.
-    let deco = &crate::preset::get(crate::preset::DEFAULT_ID).lyrics;
-    install_fonts(ctx, &p.app.font, &[&p.lyrics.font, &deco.romanization_font, &deco.translation_font]);
+    install_fonts(ctx, &p.app.font, &[&p.lyrics.font]);
 }
 
 pub fn install_style(ctx: &egui::Context) {

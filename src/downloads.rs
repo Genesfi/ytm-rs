@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -205,17 +205,19 @@ pub fn set_file_lyrics(m: FileLyrics) {
     });
 }
 
-/// The listener's lyrics source order and per-song picks, which the files' lyrics follow.
+/// The listener's lyrics source order, per-song picks and per-song timing ("videoId|source"
+/// → seconds later), which the files' lyrics follow.
 struct Choice {
     order: Vec<(Provider, bool)>,
     pins: HashMap<String, Provider>,
+    offsets: HashMap<String, f32>,
 }
 
-static CHOICE: LazyLock<RwLock<Choice>> = LazyLock::new(|| RwLock::new(Choice { order: Provider::ALL.iter().map(|p| (*p, true)).collect(), pins: HashMap::new() }));
+static CHOICE: LazyLock<RwLock<Choice>> = LazyLock::new(|| RwLock::new(Choice { order: Provider::ALL.iter().map(|p| (*p, true)).collect(), pins: HashMap::new(), offsets: HashMap::new() }));
 
-/// Take on the listener's source order and picks (at start, and when they change).
-pub fn set_lyric_choice(order: Vec<(Provider, bool)>, pins: HashMap<String, Provider>) {
-    *CHOICE.write().unwrap() = Choice { order, pins };
+/// Take on the listener's source order, picks and timing (at start, and when they change).
+pub fn set_lyric_choice(order: Vec<(Provider, bool)>, pins: HashMap<String, Provider>, offsets: HashMap<String, f32>) {
+    *CHOICE.write().unwrap() = Choice { order, pins, offsets };
 }
 
 /// After the listener picks another source for a song: its file's lyrics follow, when
@@ -226,6 +228,39 @@ pub fn lyrics_picked(video_id: &str) {
     }
     let id = video_id.to_owned();
     std::thread::spawn(move || retag(&id));
+}
+
+/// After the listener retimes a song: its file follows once the clicks stop for 2 s, so a
+/// few ‹ +0.1s › in a row write it once.
+pub fn lyrics_retimed(video_id: &str) {
+    if path(video_id).is_none() {
+        return;
+    }
+    let id = video_id.to_owned();
+    std::thread::spawn(move || {
+        if retime_settled(&id, || std::thread::sleep(std::time::Duration::from_secs(2))) {
+            retag(&id);
+        }
+    });
+}
+
+/// Counts this song's click, waits (`wait`), and says whether it's still its last click
+/// then. Each song counts its own: retiming another doesn't cancel this one's write.
+fn retime_settled(video_id: &str, wait: impl FnOnce()) -> bool {
+    static CLICKS: LazyLock<Mutex<HashMap<String, u64>>> = LazyLock::new(Default::default);
+    let me = {
+        let mut clicks = CLICKS.lock().unwrap_or_else(|e| e.into_inner());
+        let n = clicks.entry(video_id.to_owned()).or_default();
+        *n += 1;
+        *n
+    };
+    wait();
+    let mut clicks = CLICKS.lock().unwrap_or_else(|e| e.into_inner());
+    let last = clicks.get(video_id) == Some(&me);
+    if last {
+        clicks.remove(video_id);
+    }
+    last
 }
 
 /// Ask for a new folder (the system picker, on its own thread).
@@ -571,13 +606,17 @@ fn tag_lyrics(audio: &Path, video_id: &str, set: &LyricsSet) {
     if audio.extension().is_none_or(|e| e != "m4a") {
         return;
     }
-    let want = {
-        let c = CHOICE.read().unwrap();
-        tag_text(set, crate::lyrics::choose(&c.order, &c.pins, video_id, set), file_lyrics())
-    };
-    // One write to a file at a time: a new pick and a play can both retag it.
+    // One write to a file at a time: a new pick and a play can both retag it. What it
+    // should hold is worked out once it's this one's turn, so a write that waited can't
+    // put back a pick or setting that a write before it already replaced.
     static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let want = {
+        let c = CHOICE.read().unwrap();
+        let source = crate::lyrics::choose(&c.order, &c.pins, video_id, set);
+        let shift = source.and_then(|p| c.offsets.get(&format!("{video_id}|{}", p.key()))).map_or(0, |s| (s * 1000.0).round() as i32);
+        tag_text(set, source, file_lyrics(), shift)
+    };
     let written = mp4ameta::Tag::read_from_path(audio).and_then(|mut tag| {
         if tag.lyrics() == want.as_deref() {
             return Ok(());
@@ -593,11 +632,12 @@ fn tag_lyrics(audio: &Path, video_id: &str, set: &LyricsSet) {
     }
 }
 
-/// What a file's lyrics tag holds: the `source`'s lyrics, as the setting says.
-fn tag_text(set: &LyricsSet, source: Option<Provider>, mode: FileLyrics) -> Option<String> {
+/// What a file's lyrics tag holds: the `source`'s lyrics, as the setting says, timed
+/// `shift_ms` later than the source has them.
+fn tag_text(set: &LyricsSet, source: Option<Provider>, mode: FileLyrics, shift_ms: i32) -> Option<String> {
     let l = set.get(source?)?;
     let text = match mode {
-        FileLyrics::Synced => crate::lyrics::to_lrc(l),
+        FileLyrics::Synced => crate::lyrics::to_lrc(l, shift_ms),
         FileLyrics::Plain => crate::lyrics::plain_words(l),
         FileLyrics::Off => return None,
     };
@@ -970,6 +1010,14 @@ mod tests {
     }
 
     #[test]
+    fn retiming_one_song_doesnt_cancel_anothers_write() {
+        // Song a clicked, then song b while a waits: both get written.
+        assert!(retime_settled("retime-a", || assert!(retime_settled("retime-b", || {}))));
+        // A second click on the same song while the first waits: only the second writes.
+        assert!(!retime_settled("retime-a", || assert!(retime_settled("retime-a", || {}))));
+    }
+
+    #[test]
     fn the_file_gets_the_chosen_sources_lyrics_as_set() {
         use crate::lyrics::{Line, Lyrics, Sync};
         let lyrics = |provider, text: &str| Lyrics { lines: vec![Line { start: 2000, dur: 1000, text: text.into(), ..Default::default() }], sync: Sync::Line, provider, language: None, songwriters: vec![] };
@@ -977,14 +1025,16 @@ mod tests {
         let order: Vec<(Provider, bool)> = Provider::ALL.iter().map(|p| (*p, true)).collect();
         let pins = HashMap::from([("v".to_owned(), Provider::LrclibSynced)]);
         let chosen = crate::lyrics::choose(&order, &pins, "v", &set);
-        assert_eq!(tag_text(&set, chosen, FileLyrics::Synced).as_deref(), Some("[00:02.00]picked
+        assert_eq!(tag_text(&set, chosen, FileLyrics::Synced, 0).as_deref(), Some("[00:02.00]picked
 [00:03.00]"));
-        assert_eq!(tag_text(&set, chosen, FileLyrics::Plain).as_deref(), Some("picked"));
-        assert_eq!(tag_text(&set, chosen, FileLyrics::Off), None);
+        assert_eq!(tag_text(&set, chosen, FileLyrics::Synced, -300).as_deref(), Some("[00:01.70]picked
+[00:02.70]"));
+        assert_eq!(tag_text(&set, chosen, FileLyrics::Plain, 0).as_deref(), Some("picked"));
+        assert_eq!(tag_text(&set, chosen, FileLyrics::Off, 0), None);
         // No pick: the first in order.
         let first = crate::lyrics::choose(&order, &HashMap::new(), "v", &set);
-        assert_eq!(tag_text(&set, first, FileLyrics::Plain).as_deref(), Some("first"));
-        assert_eq!(tag_text(&set, None, FileLyrics::Synced), None);
+        assert_eq!(tag_text(&set, first, FileLyrics::Plain, 0).as_deref(), Some("first"));
+        assert_eq!(tag_text(&set, None, FileLyrics::Synced, 0), None);
         assert_eq!(FileLyrics::from_key(""), FileLyrics::Synced);
         assert!(FileLyrics::ALL.iter().all(|m| FileLyrics::from_key(m.key()) == *m));
     }
