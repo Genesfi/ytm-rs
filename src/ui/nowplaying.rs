@@ -2347,32 +2347,41 @@ fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics:
     for dx in [-gap, 0.0, gap] {
         ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), dot, theme::with_alpha(Color32::WHITE, 0.75 + 0.25 * h));
     }
+    let max_h = (ui.ctx().content_rect().height() - 56.0).max(160.0);
     widgets::menu_popup(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-        // Kept short: the song's first actions as icons, the lyrics sources behind one row.
-        widgets::menu_body(ui, 256.0);
-        let liked = app.heard_liked();
-        let asked = app.actions.len();
-        widgets::song_action_icons(ui, track, liked, &mut app.actions);
-        if let Some(index) = app.actions[asked..].iter().position(|action| matches!(action, Action::Like(..)))
-            && let Some(rating) = app.heard_like_action(!liked)
-        {
-            app.actions[asked + index] = rating;
-        }
-        menu_divider(ui);
-        if lyrics {
-            lyric_options(app, ui);
-            menu_divider(ui);
-        }
-        vinyl_options(app, ui);
-        menu_divider(ui);
-        menu_caption(ui, "AMBIENT");
-        switch_row(ui, "Ambient beat", &mut app.ambient_beat);
-        menu_divider(ui);
-        if app.shown_video().is_some() {
-            quality_rows(app, ui);
-            menu_divider(ui);
-        }
-        widgets::song_actions_rest(ui, track, &mut app.actions);
+        ui.set_max_width(264.0);
+        egui::ScrollArea::vertical()
+            .id_salt("np-options-scroll")
+            .max_height(max_h)
+            .max_width(264.0)
+            .auto_shrink([true, true])
+            .show(ui, |ui| {
+                // Kept short: the song's first actions as icons, the lyrics sources behind one row.
+                widgets::menu_body(ui, 256.0);
+                let liked = app.heard_liked();
+                let asked = app.actions.len();
+                widgets::song_action_icons(ui, track, liked, &mut app.actions);
+                if let Some(index) = app.actions[asked..].iter().position(|action| matches!(action, Action::Like(..)))
+                    && let Some(rating) = app.heard_like_action(!liked)
+                {
+                    app.actions[asked + index] = rating;
+                }
+                menu_divider(ui);
+                if lyrics {
+                    lyric_options(app, ui);
+                    menu_divider(ui);
+                }
+                vinyl_options(app, ui);
+                menu_divider(ui);
+                menu_caption(ui, "AMBIENT");
+                switch_row(ui, "Ambient beat", &mut app.ambient_beat);
+                menu_divider(ui);
+                if app.shown_video().is_some() {
+                    quality_rows(app, ui);
+                    menu_divider(ui);
+                }
+                widgets::song_actions_rest(ui, track, &mut app.actions);
+            });
     });
     open
 }
