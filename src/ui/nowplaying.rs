@@ -2392,11 +2392,11 @@ fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics:
                 let first_artist = track.artists.first().map(|a| a.name.as_str()).unwrap_or_default();
                 if !first_artist.is_empty() {
                     if app.blocklist.is_user_artist_blocked(first_artist) {
-                        if widgets::menu_action(ui, Some(theme::icon::BAN), &crate::tr!("ui-unblock-artist", name = first_artist)) {
+                        if widgets::menu_action(ui, Some(theme::icon::BAN), crate::tr!("ui-unblock-artist")) {
                             app.actions.push(Action::UnblockArtist(first_artist.to_string()));
                         }
                     } else {
-                        if widgets::menu_action(ui, Some(theme::icon::BAN), &crate::tr!("ui-block-artist", name = first_artist)) {
+                        if widgets::menu_action(ui, Some(theme::icon::BAN), crate::tr!("ui-block-artist")) {
                             app.actions.push(Action::BlockArtist(first_artist.to_string()));
                         }
                     }

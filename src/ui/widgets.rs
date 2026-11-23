@@ -1183,11 +1183,11 @@ pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, 
     let first_artist = t.artists.first().map(|a| a.name.as_str()).unwrap_or_default();
     if !first_artist.is_empty() {
         if super::blocklist::is_user_artist_blocked_ui(ui.ctx(), first_artist) {
-            if menu_action(ui, Some(icon::BAN), &crate::tr!("ui-unblock-artist", name = first_artist)) {
+            if menu_action(ui, Some(icon::BAN), crate::tr!("ui-unblock-artist")) {
                 acts.push(Action::UnblockArtist(first_artist.to_string()));
             }
         } else {
-            if menu_action(ui, Some(icon::BAN), &crate::tr!("ui-block-artist", name = first_artist)) {
+            if menu_action(ui, Some(icon::BAN), crate::tr!("ui-block-artist")) {
                 acts.push(Action::BlockArtist(first_artist.to_string()));
             }
         }
