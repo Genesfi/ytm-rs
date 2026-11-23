@@ -365,6 +365,10 @@ impl App {
         });
     }
 
+    pub(super) fn invalidate_played_lately(&mut self) {
+        self.stats.played_lately = None;
+    }
+
     /// Most recently played unique songs for the Home "Played lately" shelf: the currently
     /// playing track immediately at the front, followed by shared listening history in reverse
     /// chronological order (auto-synced with NabyTune's `listens.jsonl`). Cached across frames
@@ -387,6 +391,7 @@ impl App {
             && !track.id.is_empty()
             && !self.stats.hidden.hides_song(&track.id)
             && !(self.hide_explicit && track.explicit)
+            && self.blocklist.is_blocked(&track).is_none()
             && seen.insert(track.id.clone())
         {
             cards.push(Card {
@@ -407,6 +412,7 @@ impl App {
                 if l.video_id.is_empty()
                     || l.title.is_empty()
                     || self.stats.hidden.hides(l)
+                    || self.blocklist.is_listen_blocked(&l.video_id, &l.title, &l.artist)
                     || !seen.insert(l.video_id.clone())
                 {
                     continue;

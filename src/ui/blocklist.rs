@@ -23,7 +23,7 @@ pub struct Blocklist {
     pub soul_over_ai: bool,
     pub auto_dislike: bool,
     user_artists_set: HashSet<String>,
-    soul_artists_set: HashSet<String>,
+    soul_artists_set: Arc<HashSet<String>>,
 }
 
 impl Default for Blocklist {
@@ -42,7 +42,7 @@ impl Blocklist {
     ) -> Self {
         let user_artists_set = artists.iter().map(|s| s.trim().to_lowercase()).collect();
         let soul_list: Vec<String> = serde_json::from_str(SOUL_OVER_AI_RAW).unwrap_or_default();
-        let soul_artists_set = soul_list.into_iter().map(|s| s.trim().to_lowercase()).collect();
+        let soul_artists_set = Arc::new(soul_list.into_iter().map(|s| s.trim().to_lowercase()).collect());
         Self {
             artists,
             tracks,
@@ -164,6 +164,25 @@ impl Blocklist {
         let had = self.user_artists_set.remove(&low);
         self.artists.retain(|a| !a.eq_ignore_ascii_case(trimmed));
         had
+    }
+
+    pub fn clear_artists(&mut self) -> bool {
+        if self.artists.is_empty() {
+            return false;
+        }
+        self.artists.clear();
+        self.user_artists_set.clear();
+        true
+    }
+
+    pub fn is_listen_blocked(&self, video_id: &str, title: &str, artist: &str) -> bool {
+        if !artist.is_empty() && self.is_artist_blocked(artist) {
+            return true;
+        }
+        if !title.is_empty() && (self.is_artist_blocked(title) || self.tracks.iter().any(|t| t == video_id || t.eq_ignore_ascii_case(title))) {
+            return true;
+        }
+        false
     }
 
     pub fn block_song(&mut self, track: &Track) -> bool {

@@ -266,6 +266,7 @@ impl App {
             }
             Action::BlockArtist(name) => {
                 if self.blocklist.block_artist(&name) {
+                    self.invalidate_played_lately();
                     self.toast(crate::tr!("status-artist-blocked", name = name.as_str()));
                     self.drop_blocked_from_queue();
                     if let Some(t) = self.current().cloned() && self.blocklist.is_artist_blocked(&name) {
@@ -277,11 +278,13 @@ impl App {
             }
             Action::UnblockArtist(name) => {
                 if self.blocklist.unblock_artist(&name) {
+                    self.invalidate_played_lately();
                     self.toast(crate::tr!("status-artist-unblocked", name = name.as_str()));
                 }
             }
             Action::BlockSong(track) => {
                 if self.blocklist.block_song(&track) {
+                    self.invalidate_played_lately();
                     self.toast(crate::tr!("status-song-blocked", title = track.title.as_str()));
                     self.drop_blocked_from_queue();
                     if self.current_id() == Some(&track.id) {
@@ -291,6 +294,7 @@ impl App {
             }
             Action::UnblockSong(id_or_title) => {
                 if self.blocklist.unblock_song(&id_or_title) {
+                    self.invalidate_played_lately();
                     self.toast(crate::tr!("status-song-unblocked", title = id_or_title.as_str()));
                 }
             }

@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use egui::{Align2, Color32, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
@@ -92,6 +93,7 @@ pub(super) struct Rows {
     accent: Color32,
     now: f64,
     hide_explicit: bool,
+    blocklist: Arc<crate::ui::blocklist::Blocklist>,
 }
 
 impl Rows {
@@ -102,12 +104,29 @@ impl Rows {
             accent: app.accent_color(),
             now,
             hide_explicit: app.hide_explicit,
+            blocklist: Arc::new(app.blocklist.clone()),
         }
     }
 
-    /// `t` is listed: it isn't an explicit song while those are hidden.
+    /// `t` is listed: it isn't an explicit song while those are hidden, nor blocked.
     pub(super) fn shows(&self, t: &Track) -> bool {
-        !(self.hide_explicit && t.explicit)
+        !(self.hide_explicit && t.explicit) && self.blocklist.is_blocked(t).is_none()
+    }
+
+    pub(super) fn shows_card(&self, c: &Card) -> bool {
+        match &c.target {
+            Target::Song(t) => self.shows(t),
+            Target::Artist(_) => !self.blocklist.is_artist_blocked(&c.title),
+            _ => {
+                if self.blocklist.is_artist_blocked(&c.title) {
+                    return false;
+                }
+                if c.links.iter().any(|l| self.blocklist.is_artist_blocked(&l.name)) {
+                    return false;
+                }
+                true
+            }
+        }
     }
 
     pub(super) fn opts(&self, liked: &HashSet<String>, t: &Track, number: Option<usize>, show_album: bool) -> RowOpts {
@@ -546,7 +565,7 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
         };
         match &s.kind {
             ShelfKind::Cards(cards) => {
-                let cards: Vec<&Card> = cards.iter().filter(|c| !matches!(&c.target, Target::Song(t) if !rows.shows(t))).collect();
+                let cards: Vec<&Card> = cards.iter().filter(|c| rows.shows_card(c)).collect();
                 if cards.is_empty() {
                     continue;
                 }
@@ -751,7 +770,7 @@ fn mood(app: &mut App, ui: &mut Ui, params: &str, now: f64) {
         let id = format!("mood-{i}-{}", s.title);
         match &s.kind {
             ShelfKind::Cards(cards) => {
-                let cards: Vec<&Card> = cards.iter().filter(|c| !matches!(&c.target, Target::Song(t) if !rows.shows(t))).collect();
+                let cards: Vec<&Card> = cards.iter().filter(|c| rows.shows_card(c)).collect();
                 if !cards.is_empty() {
                     cards_shelf(ui, &app.liked, &mut app.actions, &id, &s.title, s.strapline.as_deref(), s.strap_thumb.as_deref(), &cards);
                 }
@@ -1330,8 +1349,8 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
         row_drag::carry(ui, drag, list);
     }
     card_row(ui, "a-albums", crate::tr!("nav-albums-singles"), &a.albums, acts);
-    // Their songs you've saved, less those hidden as explicit.
-    let library: Vec<&Card> = a.library.iter().filter(|c| !matches!(&c.target, Target::Song(t) if !rows.shows(t))).collect();
+    // Their songs you've saved, less those hidden as explicit or blocked.
+    let library: Vec<&Card> = a.library.iter().filter(|c| rows.shows_card(c)).collect();
     if !library.is_empty() {
         cards_shelf(ui, &app.liked, acts, "a-lib", crate::tr!("nav-from-library"), None, None, &library);
     }
@@ -2042,25 +2061,45 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
         let manual = blocklist.artists.len();
         let ai = if blocklist.soul_over_ai { blocklist.soul_artist_count() } else { 0 };
         ui.add_space(4.0);
-        ui.label(egui::RichText::new(tr!("settings-blocked-artists-header", manual = manual, ai = ai)).font(theme::semibold(13.0)).color(theme::text()));
+        let mut clear_all = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(tr!("settings-blocked-artists-header", manual = manual, ai = ai)).font(theme::semibold(13.0)).color(theme::text()));
+            if !blocklist.artists.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(tr!("settings-clear")).clicked() {
+                        clear_all = true;
+                    }
+                });
+            }
+        });
         ui.add_space(6.0);
-        if blocklist.artists.is_empty() {
+        if clear_all {
+            blocklist.clear_artists();
+            app.invalidate_played_lately();
+        } else if blocklist.artists.is_empty() {
             ui.label(egui::RichText::new(tr!("settings-no-blocked-artists")).font(theme::regular(13.0)).color(theme::text_dim()));
         } else {
             let mut unblock_name = None;
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                for artist in &blocklist.artists {
-                    if widgets::pill(ui, artist, Some(icon::X), false)
-                        .on_hover_text(tr!("ui-unblock-artist", name = artist.as_str()))
-                        .clicked()
-                    {
-                        unblock_name = Some(artist.clone());
-                    }
-                }
-            });
+            egui::ScrollArea::vertical()
+                .id_salt("blocked_artists_scroll")
+                .max_height(85.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                        for artist in &blocklist.artists {
+                            if widgets::pill(ui, artist, Some(icon::X), false)
+                                .on_hover_text(tr!("ui-unblock-artist", name = artist.as_str()))
+                                .clicked()
+                            {
+                                unblock_name = Some(artist.clone());
+                            }
+                        }
+                    });
+                });
             if let Some(name) = unblock_name {
                 blocklist.unblock_artist(&name);
+                app.invalidate_played_lately();
             }
         }
         ui.add_space(4.0);
