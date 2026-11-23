@@ -1908,32 +1908,37 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     // A finger on the cards: the shelf's own drag would take an up-and-down swipe too
     // and the page wouldn't move, so the drag is handled here instead, locked to the
     // way it starts (the shelf sideways, the page up and down).
-    let rect_id = sid.with("rect");
+    // Use ui.cursor().min so the interaction rect is always positioned accurately
+    // in the current frame, even after the parent page has scrolled vertically.
+    let height_id = sid.with("h_height");
+    let height = ui.ctx().data(|d| d.get_temp::<f32>(height_id)).unwrap_or(item_width + 58.0);
+    let rect = Rect::from_min_size(ui.cursor().min, vec2(viewport, height));
     let mut drag_delta = 0.0;
+    let mut dragging_horizontal = false;
     {
         use egui::scroll_area::{DragScroll, ScrollSource};
         area = area.scroll_source(ScrollSource { drag: DragScroll::Never, ..ScrollSource::default() });
-        if let Some(rect) = ui.ctx().data(|d| d.get_temp::<Rect>(rect_id)) {
-            let resp = ui.interact(rect, sid.with("touch"), Sense::DRAG);
-            if resp.drag_started() || resp.dragged() {
-                ui.ctx().data_mut(|d| d.remove::<f32>(target_id));
-                target = None;
+        let resp = ui.interact(rect, sid.with("touch"), Sense::DRAG);
+        if resp.drag_started() || resp.dragged() {
+            ui.ctx().data_mut(|d| d.remove::<f32>(target_id));
+            target = None;
+        }
+
+        match axis_locked_drag(ui, &resp, sid.with("axis")) {
+            Some(DragAction::Step(dx)) => {
+                dragging_horizontal = true;
+                drag_delta = dx;
             }
-            match axis_locked_drag(ui, &resp, sid.with("axis")) {
-                Some(DragAction::Step(dx)) => {
-                    drag_delta = dx;
-                }
-                Some(DragAction::Coast(vx)) => {
-                    let coast_target = (current - vx).clamp(0.0, max_scroll);
-                    ui.ctx().animate_value_with_time(anim_id, current, 0.0);
-                    target = Some(coast_target);
-                    ui.ctx().data_mut(|d| d.insert_temp(target_id, coast_target));
-                }
-                None => {}
+            Some(DragAction::Coast(vx)) => {
+                let coast_target = (current - vx).clamp(0.0, max_scroll);
+                ui.ctx().animate_value_with_time(anim_id, current, 0.0);
+                target = Some(coast_target);
+                ui.ctx().data_mut(|d| d.insert_temp(target_id, coast_target));
             }
+            None => {}
         }
     }
-    if drag_delta != 0.0 {
+    if dragging_horizontal {
         let new_offset = (current - drag_delta).clamp(0.0, max_scroll);
         area = area.horizontal_scroll_offset(new_offset);
     } else if let Some(t) = target {
@@ -1949,7 +1954,7 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     }).inner);
     ui.ctx().data_mut(|d| {
         d.insert_temp(viewport_id, out.inner_rect.width());
-        d.insert_temp(rect_id, out.inner_rect);
+        d.insert_temp(height_id, out.inner_rect.height());
     });
     (out.inner, reached_end)
 }
@@ -2381,6 +2386,19 @@ mod shelf_touch_tests {
         let (s1_moved, s2_moved) = p.swipe(pos2(400.0, 250.0), vec2(-150.0, 0.0));
         assert_eq!(s1_moved.x, 0.0, "shelf 1 moved when shelf 2 was dragged: {s1_moved:?}");
         assert!(s2_moved.x < -100.0, "shelf 2 didn't scroll: {s2_moved:?}");
+    }
+
+    #[test]
+    fn swiping_back_after_reaching_end_scrolls_shelf_back() {
+        let mut p = Page::new();
+        // Swipe left to scroll forward (card moves left)
+        let moved = p.swipe(pos2(400.0, 200.0), vec2(-250.0, 0.0));
+        assert!(moved.x < -100.0, "shelf didn't scroll forward: {moved:?}");
+        let pos_after_forward = p.card.min.x;
+        // Swipe right to scroll backward (card moves right)
+        let moved_back = p.swipe(pos2(400.0, 200.0), vec2(250.0, 0.0));
+        assert!(moved_back.x > 100.0, "shelf didn't scroll backward: {moved_back:?}");
+        assert!(p.card.min.x > pos_after_forward, "card position did not move back");
     }
 }
 

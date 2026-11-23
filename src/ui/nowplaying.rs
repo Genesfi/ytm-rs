@@ -1902,7 +1902,8 @@ fn video_line_pill(app: &App, ui: &Ui, picture: Rect) {
     let Some(lyrics) = app.lyric_prefs.choose(id, set).and_then(|p| set.get(p)) else { return };
     // As the lyrics panel has it: what's audible, on the listener's timing.
     let pos = app.audio.status.position_smooth().as_secs_f64() - app.audio.status.latency().as_secs_f64();
-    let t = ((pos - app.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == Sync::Word)) * 1000.0) as i32;
+    let v_off = app.video_offset() as f64 / 1000.0;
+    let t = (((pos - v_off) - app.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == Sync::Word)) * 1000.0) as i32;
     let Some(line) = lyrics.lines.iter().find(|l| !l.instrumental && l.start <= t && t < l.start + l.dur) else { return };
     let g = widgets::galley(ui, &line.text, theme::semibold(15.0), Color32::WHITE, picture.width() - 64.0);
     let r = Rect::from_center_size(pos2(picture.center().x, picture.bottom() - 34.0), g.size() + vec2(24.0, 12.0));
@@ -2190,7 +2191,8 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
     // Audible position: the device plays what the player hands it a buffer later.
     let pos = app.audio.status.position_smooth().as_secs_f64() - app.audio.status.latency().as_secs_f64();
     let pos = app.lyric_clock.tick(pos, playing, now, app.audio.status.speed() as f64);
-    let t = pos - app.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == Sync::Word);
+    let v_off = app.video_offset() as f64 / 1000.0;
+    let t = (pos - v_off) - app.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == Sync::Word);
     let (roman, trans) = decorations(app.show_roman, app.show_trans, &app.lyric_prefs.target, app.lyrics_extras.as_ref(), id, lyrics);
     let key = {
         use std::hash::{Hash, Hasher};
@@ -2218,7 +2220,8 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
     app.lyric_view = view;
     if let Some(s) = out.seek {
         // The line's time on the player's clock: `t` above, the other way round.
-        let at = s + app.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == Sync::Word) + app.audio.status.latency().as_secs_f64();
+        let v_off = app.video_offset() as f64 / 1000.0;
+        let at = s + v_off + app.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == Sync::Word) + app.audio.status.latency().as_secs_f64();
         app.actions.push(Action::Seek(at.max(0.0) as f32));
     }
     if out.animating && !app.window_hidden {

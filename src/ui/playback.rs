@@ -345,7 +345,7 @@ impl App {
     }
 
     /// How far the music video playing for the current song runs ahead of the song.
-    fn video_offset(&self) -> i64 {
+    pub(super) fn video_offset(&self) -> i64 {
         let (Some(song), Some(video)) = (self.current(), self.playing_as()) else { return 0 };
         self.music_videos.get(&song.id).and_then(Option::as_ref).filter(|m| m.video.id == video.id).map_or(0, |m| m.offset_ms)
     }
