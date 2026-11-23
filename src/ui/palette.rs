@@ -54,6 +54,7 @@ enum Act {
     FullScreen,
     Jam,
     NewPlaylist,
+    Recognize,
 }
 
 /// Listed in this order when nothing ranks one above another.
@@ -212,6 +213,7 @@ fn entries(app: &App) -> Vec<Entry> {
         (true, false) => crate::tr!("jam-leave"),
     };
     add(Group::Actions, act(Act::Jam), jam, "", icon::USERS);
+    add(Group::Actions, act(Act::Recognize), crate::tr!("recognize-song"), crate::tr!("recognize-experimental"), icon::HEADPHONES);
     if app.logged_in {
         add(Group::Actions, act(Act::NewPlaylist), crate::tr!("ui-new-playlist"), "", icon::LIST_PLUS);
     }
@@ -441,7 +443,9 @@ fn row(ui: &mut Ui, e: &Entry, selected: bool, unlike: Option<egui::Id>, enter_p
     };
     let x = rect.left() + 42.0;
     let g = widgets::galley(ui, &e.label, theme::regular(14.0), theme::text(), rect.right() - 12.0 - detail_w - x);
-    ui.painter().galley(pos2(x, mid - g.size().y / 2.0), g, theme::text());
+    let pos = pos2(x, mid - g.size().y / 2.0);
+    ui.painter().galley(pos, g.clone(), theme::text());
+    widgets::tip_if_elided(ui, Rect::from_min_size(pos, g.size()), &g, &e.label);
     let activated = gesture.map_or_else(|| resp.clicked(), |gesture| gesture.activate);
     (resp, activated)
 }
@@ -492,6 +496,7 @@ fn run_command(app: &mut App, ctx: &egui::Context, cmd: Command) {
                 app.actions.push(Action::Go(Page::Jam));
             }
             Act::NewPlaylist => app.actions.push(Action::NewPlaylist(Vec::new())),
+            Act::Recognize => super::recognize::start(app),
         },
     }
 }

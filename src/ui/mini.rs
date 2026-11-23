@@ -82,6 +82,10 @@ fn height_led(from: Vec2, to: Vec2) -> bool {
 /// to change its size. Only Windows says.
 static MOVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+pub(super) fn moving() -> bool {
+    MOVING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Picture in picture's shape for Windows, which keeps it while the edges are dragged:
 /// the video's width over height, and the size limits, in physical pixels.
 #[cfg(windows)]
@@ -1408,10 +1412,11 @@ fn card_body(app: &mut App, ui: &mut Ui, cr: Rect, now: f64) {
         match app.playing_from() {
             Some((label, name, target)) => {
                 text_at(ui, pos2(l, head - 16.0), label, theme::regular(11.0), theme::text_faint(), head_w);
-                let nr = text_at(ui, pos2(l, head - 1.0), &name, theme::semibold(13.0), theme::text(), head_w);
+                let (nr, elided) = widgets::text_at_elided(ui, pos2(l, head - 1.0), &name, theme::semibold(13.0), theme::text(), head_w);
                 let sense = if live { Sense::click() } else { Sense::hover() };
                 let resp = named(ui.interact(nr, ui.scope_id().with("card-from"), sense), &name);
                 let resp = if live { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+                let resp = if elided { resp.on_hover_text(&name) } else { resp };
                 if resp.hovered() && live {
                     ui.painter().hline(nr.x_range(), nr.bottom(), egui::Stroke::new(1.0, theme::text()));
                 }

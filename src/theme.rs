@@ -62,6 +62,12 @@ fn fade() -> f32 {
     f32::from_bits(FADE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// How long a UI transition written as 1 second runs: [`SPEED`] and the theme's fades
+/// (never 0: a theme's fades go down to 0.3 of the usual).
+pub fn motion() -> f32 {
+    SPEED * fade()
+}
+
 /// Text and icons on a fill of the main text colour (a primary button, a selected chip).
 pub fn on_text() -> Color32 {
     match filed(F_TEXT) {
@@ -896,6 +902,9 @@ pub mod icon {
     pub const HEART: char = '\u{e0f2}';
     pub const THUMBS_DOWN: char = '\u{e189}';
     pub const LIST_MUSIC: char = '\u{e2e0}';
+    /// Lucide 0.460's, added to the subset with `airplay` (the font's own codepoints).
+    pub const MONITOR_SPEAKER: char = '\u{e210}';
+    pub const AIRPLAY: char = '\u{e039}';
     pub const MIC_VOCAL: char = '\u{e349}';
     pub const X: char = '\u{e1b2}';
     pub const HISTORY: char = '\u{e1f5}';

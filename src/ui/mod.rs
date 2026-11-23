@@ -5,6 +5,7 @@
 
 mod account;
 mod actions;
+mod arrive;
 mod bar_swipe;
 mod blocklist;
 mod collections;
@@ -40,6 +41,7 @@ pub use titlebar::{custom as custom_titlebar, init as init_titlebar, inset as ti
 #[cfg(target_os = "macos")]
 pub use titlebar::set_view as set_titlebar_view;
 mod transfer;
+mod recognize;
 mod undo;
 mod vector;
 mod wheel;
@@ -534,6 +536,10 @@ pub struct App {
     /// Files chosen in the upload dialog, handed over from its thread.
     picked_uploads: Arc<std::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
     liked: HashSet<String>,
+    /// Settings › Downloads › Download liked songs, and the liked songs queued for it
+    /// since launch (each once, so one that can't be downloaded doesn't fail on every load).
+    download_liked: bool,
+    liked_queued: HashSet<String>,
     ratings: ratings::Ratings,
     rating_settings: ratings::Settings,
     pub blocklist: blocklist::Blocklist,
@@ -555,6 +561,10 @@ pub struct App {
     // playback
     queue: Queue,
     generation: u64,
+    /// Monotonic counter for assigning play and staged-gapless generation numbers without collisions.
+    gen_counter: u64,
+    /// Next song staged into the audio engine ahead of the current track's end for gapless playback.
+    staged: Option<StagedNext>,
     buffering: bool,
     /// Unplayable songs skipped in a row; a run of them stops playback instead of
     /// racing through the queue.
@@ -567,8 +577,12 @@ pub struct App {
     log_volume: bool,
     /// Pausing and playing again fade, rather than cut off and start at once.
     pause_fade: bool,
+    /// Songs end where they go silent for good.
+    skip_silence: bool,
     high_quality: bool,
     backup_stream: bool,
+    /// Settings › Network › Allow local network scan, which AirPlay speakers need.
+    local_network: bool,
     backup_prompt: BackupPrompt,
     reveal_backup_setting: bool,
     backup_setting_highlight_until: f64,
@@ -622,6 +636,10 @@ pub struct App {
     /// [`crate::i18n::current`] until the next start.
     language: Option<String>,
     radio_pending: bool,
+    /// Smart shuffle (Settings › Playback): songs from a radio mixed in while shuffled; and
+    /// the song whose radio is on its way for it.
+    smart_shuffle: bool,
+    smart_seed: Option<String>,
     /// The last song ended with nothing after it: radio carries on from there.
     ended: bool,
     seek_drag: Option<f32>,
@@ -657,6 +675,8 @@ pub struct App {
     /// Panels frost what's behind them, in themes that have them do so.
     glass_on: bool,
     reactive_bg: bool,
+    /// Bars along the bottom of now playing that move with the music (off unless switched on).
+    visualizer: bool,
     /// Bright album art is darkened behind now playing and the pages, for the text over it.
     dim_bright: bool,
     /// Show the Now Playing cover as a vinyl disc across every theme.
@@ -680,6 +700,8 @@ pub struct App {
     time_left: bool,
     /// Skip the parts of music videos SponsorBlock marks as not music.
     sponsorblock: bool,
+    /// Play consecutive songs without a pause between them (Settings › Playback).
+    gapless: bool,
     /// Crossfade between songs, and over how many seconds.
     crossfade: bool,
     crossfade_secs: u32,
@@ -699,6 +721,8 @@ pub struct App {
     keep_pitch: bool,
     /// The next song starts because this one is ending: crossfade into it.
     handoff: bool,
+    /// The sleep timer, when it's set (not saved).
+    sleep: Option<Sleep>,
     /// SponsorBlock segments for a video, and when one was last skipped.
     segments: Option<(String, Vec<crate::sponsorblock::Segment>)>,
     segment_skipped: f64,
@@ -766,6 +790,10 @@ pub struct App {
     /// The Spotify transfer, running on the network runtime.
     transfer: Arc<crate::transfer::Transfer>,
     xfer: transfer::Setup,
+    /// Recognize song (Shazam): what it's doing or found.
+    recognize: Arc<crate::recognize::Recognizer>,
+    /// It paused our playback to listen; play again once it has.
+    recognizing: recognize::Recognizing,
     /// Listen together: the room we're in, if any.
     jam: jam::Session,
     signing_in: Arc<AtomicBool>,
@@ -997,6 +1025,8 @@ impl App {
             all_downloaded: HashMap::new(),
             picked_uploads: Default::default(),
             liked: HashSet::new(),
+            download_liked: get("download_liked").is_some_and(|v| v == "1"),
+            liked_queued: HashSet::new(),
             ratings: Default::default(),
             rating_settings: ratings::Settings::load(get),
             blocklist: blocklist::Blocklist::load(get),
@@ -1015,6 +1045,8 @@ impl App {
                 _ => Repeat::Off,
             }),
             generation: 0,
+            gen_counter: 0,
+            staged: None,
             buffering: false,
             skip_streak: 0,
             recoveries: 0,
@@ -1022,8 +1054,10 @@ impl App {
             normalize: get("normalize").map_or_else(Default::default, |v| crate::audio::Normalize::from_key(&v)),
             log_volume: get("log_volume").is_none_or(|v| v == "1"),
             pause_fade: get("pause_fade").is_none_or(|v| v == "1"),
+            skip_silence: get("skip_silence").is_some_and(|v| v == "1"),
             high_quality: get("high_quality").is_none_or(|v| v == "1"),
             backup_stream,
+            local_network: get("local_network").is_some_and(|v| v == "1"),
             backup_prompt: BackupPrompt::default(),
             reveal_backup_setting: false,
             backup_setting_highlight_until: 0.0,
@@ -1098,6 +1132,8 @@ impl App {
             restart_app: false,
             media_cover: Default::default(),
             radio_pending: false,
+            smart_shuffle: get("smart_shuffle").is_some_and(|v| v == "1"),
+            smart_seed: None,
             ended: false,
             seek_drag: None,
             seek_wheel: seek_wheel::SeekWheel::default(),
@@ -1123,6 +1159,7 @@ impl App {
             bg_brightness: shell::load_factor(get("bg_brightness"), shell::BG_BRIGHTNESS),
             glass_on: get("glass_on").is_none_or(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
+            visualizer: get("visualizer").is_some_and(|v| v == "1"),
             dim_bright: get("dim_bright").is_none_or(|v| v == "1"),
             vinyl_mode: get("vinyl_mode").is_none_or(|v| v == "1"),
             vinyl_rotate: get("vinyl_rotate").is_none_or(|v| v == "1"),
@@ -1135,8 +1172,10 @@ impl App {
             seek_knob_always: get("seek_knob_always").is_some_and(|v| v == "1"),
             time_left: get("time_left").is_some_and(|v| v == "1"),
             sponsorblock: get("sponsorblock").is_some_and(|v| v == "1"),
+            gapless: get("gapless").is_none_or(|v| v == "1"),
             crossfade: get("crossfade").is_some_and(|v| v == "1"),
             handoff: false,
+            sleep: None,
             crossfade_skips: get("crossfade_skips").is_some_and(|v| v == "1"),
             crossfade_secs: get("crossfade_secs").and_then(|v| v.parse().ok()).unwrap_or(5).clamp(1, CROSSFADE_MAX),
             eq_on: get("eq").is_some_and(|v| v == "1"),
@@ -1196,6 +1235,8 @@ impl App {
             signing_in: Default::default(),
             transfer: transfer_handle,
             xfer: Default::default(),
+            recognize: crate::recognize::Recognizer::new(),
+            recognizing: Default::default(),
             jam: Default::default(),
             toast: None,
             toast_after_unlike: None,
@@ -1302,8 +1343,11 @@ impl App {
         }
         jam::dev_hooks(&mut app);
         app.audio.set_normalize(app.normalize);
+        app.set_gapless();
+        app.audio.set_spectrum(app.visualizer);
         app.set_crossfade();
         app.audio.set_pause_fade(app.pause_fade);
+        app.audio.set_skip_silence(app.skip_silence);
         app.set_eq();
         app.audio.set_stereo(app.stereo);
         app
@@ -1687,6 +1731,8 @@ impl eframe::App for App {
         self.sync_look();
         self.pump(ctx, now);
         self.tick_album_accent(ctx, now);
+        self.sync_sleep();
+        self.sync_staged();
         // A sorted playlist that loads again in a while, for its new order.
         if let Some(t) = self.sorting.values().filter_map(lists::SortWait::due).reduce(f64::min) {
             ctx.request_repaint_after(Duration::from_secs_f64((t - now).max(0.0)));
@@ -1831,6 +1877,7 @@ impl eframe::App for App {
             // Its time runs out even with the window hidden, when nothing else draws.
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+        recognize::tick(self, ctx);
         // Frame pacing: idle costs nothing. The background drifts slowly, so ~15 fps
         // reads as smooth on pages; the now-playing view and a page showing the playing
         // row's bars run at 30 fps, and the synced lyrics ask for 60 while they animate
@@ -1868,6 +1915,7 @@ impl eframe::App for App {
         crate::shader::set_glass_on(self.glass_on);
         let now = ctx.input(|i| i.time);
         self.sync_ratings(&ctx, now);
+        recognize::popout(self, &ctx);
         // In the tray, or minimized: nothing would be seen, so nothing is drawn. eframe skips
         // a minimized window itself, but not one hidden in the tray (it can't tell on Windows
         // or X11), and would otherwise draw the whole window, background and glass included,
@@ -2160,6 +2208,7 @@ impl eframe::App for App {
         notes::dialog(self, &ctx);
         if let Some(url) = self.share_pending.take() { ctx.copy_text(url); }
         shell::suggestions(self, &ctx);
+        recognize::inline(self, &ctx);
         shell::toast(self, &ctx, now);
 
         titlebar::window_buttons(&ctx);
@@ -2205,7 +2254,7 @@ impl eframe::App for App {
         // in points at this zoom. Everything else in egui's memory starts fresh.
         storage.set_string("egui", format!("(options:(zoom_factor:{:?}))", self.zoom));
         if std::env::var_os("YTM_MUTE").is_none() {
-            storage.set_string("volume", self.audio.volume().to_string());
+            storage.set_string("volume", self.audio.own_volume().to_string());
         }
         let repeat = match self.queue.repeat {
             Repeat::Off => "off",
@@ -2215,6 +2264,7 @@ impl eframe::App for App {
         storage.set_string("repeat", repeat.into());
         let b = |v: bool| if v { "1" } else { "0" }.to_owned();
         storage.set_string("autoplay", b(self.autoplay));
+        storage.set_string("smart_shuffle", b(self.smart_shuffle));
         storage.set_string("jam_name", self.jam.name.clone());
         let cache = self.logged_in.then(|| AccountCache {
             name: self.account_name.clone(),
@@ -2225,8 +2275,10 @@ impl eframe::App for App {
         storage.set_string("normalize", self.normalize.key().to_owned());
         storage.set_string("log_volume", b(self.log_volume));
         storage.set_string("pause_fade", b(self.pause_fade));
+        storage.set_string("skip_silence", b(self.skip_silence));
         storage.set_string("high_quality", b(self.high_quality));
         storage.set_string("backup_stream", b(self.backup_stream));
+        storage.set_string("local_network", b(self.local_network));
         storage.set_string("play_songs", b(self.play_songs));
         storage.set_string("show_video", b(self.show_video));
         storage.set_string("video_quality", self.video_quality.to_string());
@@ -2303,6 +2355,7 @@ impl eframe::App for App {
         storage.set_string("bg_brightness", format!("{:.2}", self.bg_brightness));
         storage.set_string("glass_on", b(self.glass_on));
         storage.set_string("reactive_bg", b(self.reactive_bg));
+        storage.set_string("visualizer", b(self.visualizer));
         storage.set_string("dim_bright", b(self.dim_bright));
         storage.set_string("vinyl_mode", b(self.vinyl_mode));
         storage.set_string("vinyl_rotate", b(self.vinyl_rotate));
@@ -2313,6 +2366,8 @@ impl eframe::App for App {
         storage.set_string("seek_knob_always", b(self.seek_knob_always));
         storage.set_string("time_left", b(self.time_left));
         storage.set_string("sponsorblock", b(self.sponsorblock));
+        storage.set_string("download_liked", b(self.download_liked));
+        storage.set_string("gapless", b(self.gapless));
         storage.set_string("crossfade", b(self.crossfade));
         storage.set_string("crossfade_secs", self.crossfade_secs.to_string());
         storage.set_string("crossfade_skips", b(self.crossfade_skips));
@@ -2371,17 +2426,26 @@ const VIDEO_QUALITIES: [u32; 4] = [1080, 720, 480, 360];
 
 /// The pointer moving wakes a frame per event, up to the monitor's rate, and each of those
 /// asks for more: frames wait for 60 fps unless the listener is doing something that wants
-/// every frame (clicking, typing, scrolling), or the lyrics run at the screen's rate.
+/// every frame (clicking, typing, scrolling, moving or resizing the window), or the lyrics
+/// run at the screen's rate.
 fn frame_pace(raw: &egui::RawInput, full_rate: bool) {
     use egui::Event as E;
-    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-    let mut last = LAST.lock().unwrap();
+    struct State {
+        last: Option<std::time::Instant>,
+        geometry: Option<(Option<egui::Rect>, Option<egui::Rect>)>,
+    }
+    static STATE: std::sync::Mutex<State> = std::sync::Mutex::new(State { last: None, geometry: None });
+    let mut state = STATE.lock().unwrap();
+    let geometry = (raw.screen_rect, raw.viewport().outer_rect);
+    let geometry_changed = state.geometry.replace(geometry).is_some_and(|g| g != geometry);
     let acting = full_rate
+        || geometry_changed
+        || mini::moving()
         || raw.events.iter().any(|e| matches!(e, E::PointerButton { .. } | E::MouseWheel { .. } | E::Key { .. } | E::Text(_) | E::Ime(_) | E::Zoom(_) | E::Touch { .. }));
-    if !acting && let Some(wait) = last.and_then(|l| Duration::from_millis(16).checked_sub(l.elapsed())) {
+    if !acting && let Some(wait) = state.last.and_then(|l| Duration::from_millis(16).checked_sub(l.elapsed())) {
         std::thread::sleep(wait);
     }
-    *last = Some(std::time::Instant::now());
+    state.last = Some(std::time::Instant::now());
 }
 
 /// Start this exe again once this process has saved and exited.
@@ -2462,6 +2526,20 @@ struct Session {
     /// for the current song): the position is its.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     playing_as: Option<Track>,
+    /// Shuffled: the order to go back to, so shuffle is still on after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unshuffled: Option<Vec<String>>,
+    /// Shuffled: the songs Smart shuffle mixed in, which shuffle going off takes out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mixed: Vec<String>,
+}
+
+/// When the sleep timer pauses: at a moment (the audio thread pauses then, see
+/// `AudioCmd::SleepAt`), or once the song playing ends, holding the next one at its start.
+#[derive(Clone, Copy, PartialEq)]
+enum Sleep {
+    At(std::time::Instant),
+    SongEnd,
 }
 
 /// The song version playing in place of the music video `listed`, in play `generation`;
@@ -2472,6 +2550,15 @@ struct PlayingAs {
     song: Track,
 }
 
+/// The next track staged into the audio engine for gapless handoff behind `after`.
+struct StagedNext {
+    after: u64,
+    generation: u64,
+    repeat_one: bool,
+    want_song: bool,
+    track: Track,
+    song: Option<Track>,
+}
 
 /// A restored window size can exceed the monitor (e.g. saved after maximizing),
 /// leaving the player bar partly off-screen. Once at startup, maximize instead.

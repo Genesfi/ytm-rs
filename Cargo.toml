@@ -1,6 +1,6 @@
 [package]
 name = "ytm-rs"
-version = "0.3.4"
+version = "2.0.2"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/grapedjuice/ytm-rs"
@@ -65,11 +65,27 @@ sys-locale = "0.3.2"
 zip = { version = "9.8.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tar = { version = "0.4.46", default-features = false }
 liblzma = { version = "0.4.9", features = ["static"] }
+# AirPlay speakers (airplay.rs): finding them on the network (only with Settings ›
+# Network › Allow local network scan on).
+mdns-sd = "0.22.0"
+# AirPlay 2's transient pairing (SRP over RFC 5054's 3072-bit group) and its
+# encryption (airplay/pair.rs).
+num-bigint = "0.4.8"
+hkdf = "0.12.4"
+chacha20poly1305 = "0.10.1"
+getrandom = "0.3.4"
+# AirPlay 2's requests and answers are binary plists (airplay/ap2.rs).
+plist = "1.10.4"
+
+# Recognize song (recognize/): Shazam's signature, and its request's IDs.
+realfft = "3.5"
+crc32fast = "1.5.2"
+uuid = { version = "1.27", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows Credential Manager, for the Google and Spotify sign-ins.
 keyring = { version = "3.6.3", features = ["windows-native"] }
-windows = { version = "0.62.2", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The Secret Service (GNOME Keyring, KWallet) for the sign-ins.
@@ -86,6 +102,11 @@ keyring = { version = "3.6.3", features = ["apple-native"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSUserDefaults"] }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+# Recognize song: recording what plays (capture.rs). Newer than rodio's own cpal, for its
+# fixed macOS tap (cpal#1123).
+cpal = "0.18.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -113,8 +134,11 @@ winresource = "0.1.31"
 # in vendor/epaint/src/text/text_layout.rs.
 # souvlaki with its Linux media controls sending changes as they happen, not one a
 # second (#144): see the ytm-rs notes in vendor/souvlaki/src/platform/mpris/dbus/controls.rs.
-# winit with X11 windows taking a scale that changes after they open (#208): see the
-# ytm-rs notes in vendor/winit/src/platform_impl/linux/x11/window.rs.
+# winit with X11 windows taking a scale that changes after they open (#208) and Windows
+# throttling move repaints (~30 fps) and skipping duplicate resize paints in the size/move
+# loop so dragging and resizing run at the monitor's refresh rate without freezing video:
+# see the ytm-rs notes in vendor/winit/src/platform_impl/linux/x11/window.rs and
+# vendor/winit/src/platform_impl/windows/event_loop.rs.
 [patch.crates-io]
 epaint = { path = "vendor/epaint" }
 souvlaki = { path = "vendor/souvlaki" }

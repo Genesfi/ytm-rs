@@ -2,10 +2,12 @@
 //! animated background. The lyrics themselves are drawn by `karaoke` (a port of the
 //! better-lyrics renderer); this adds their toolbar and the plain-text fallback.
 
+use std::time::{Duration, Instant};
+
 use egui::{Color32, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use super::widgets::{self, icon_button, menu_divider, named, text_at};
-use super::{Action, App, NpTab, karaoke};
+use super::{Action, App, NpTab, Sleep, karaoke};
 use crate::lyrics::{Lyrics, Sync, SyncKind};
 use crate::shader::Params;
 use crate::theme::{self, icon};
@@ -62,7 +64,7 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
                 super::shell::vgradient(&ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(screen), band, Color32::TRANSPARENT, theme::shade(0.3));
             }
             // Swallow input so the page underneath doesn't react.
-            ui.allocate_rect(shown, Sense::click_and_drag());
+            let sheet_id = ui.allocate_rect(shown, Sense::click_and_drag()).id;
             if let Some(video) = &video_only {
                 video_fullscreen(app, ui, rect, video, now);
                 return;
@@ -90,6 +92,11 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
             backdrop(app, ui, sheet, shown, now, behind);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
             body(app, &mut child, now);
+            // A finger swiping down it closes it, as on the bar; not one dragging the
+            // lyrics, the seek line or the window. After `body`, so those drags are known.
+            if t >= 1.0 {
+                super::bar_swipe::swipe(app, ctx, rect, "now-playing", Some(sheet_id));
+            }
         });
 }
 
@@ -229,6 +236,28 @@ fn backdrop(app: &mut App, ui: &mut Ui, rect: Rect, clip: Rect, now: f64, behind
     }
     if app.ambient_light && app.shown_video().is_some() {
         paint_glow(app, ui, rect, clip);
+    }
+    if app.visualizer && app.playing() && app.shown_video().is_none() {
+        visualizer(app, &painter, rect);
+        // The bars change every ~21 ms: 30 fps, like the animated layer, without drawing
+        // Now playing at the screen's full rate.
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+    }
+}
+
+/// Settings › Appearance › Visualizer: a bar per band along the bottom, in the accent
+/// colour, faint enough for the lyrics and art over it.
+fn visualizer(app: &App, painter: &egui::Painter, rect: Rect) {
+    let bars = app.audio.status.spectrum();
+    // On the content's bottom edge: the player bar covers the backdrop below it.
+    let bottom = if app.fullscreen { rect.bottom() } else { rect.bottom() - app.bar_height() };
+    let (gap, max_h) = (4.0, rect.height() * 0.22);
+    let w = (rect.width() - gap * (bars.len() + 1) as f32) / bars.len() as f32;
+    let color = theme::with_alpha(app.accent_color(), 0.35);
+    for (i, v) in bars.iter().enumerate() {
+        let h = (v * max_h).max(2.0);
+        let x = rect.left() + gap + i as f32 * (w + gap);
+        painter.rect_filled(Rect::from_min_max(pos2(x, bottom - h), pos2(x + w, bottom)), w.min(6.0) / 2.0, color);
     }
 }
 
@@ -674,46 +703,94 @@ struct PanelMotion {
     art_vis: f32,
 }
 
-/// The side panel (lyrics / up next) slides in and out when its chip is toggled.
-/// A song without lyrics shows just the artwork, with no transition. Called again in
-/// the same frame it gives the same answer.
+/// Whether the lyrics panel should be shown given the track's lyric state:
+/// `loaded_lyrics` is `None` while lyrics are still fetching for the new track, in which
+/// case we hold `prev_open` so switching between songs without lyrics stays centered
+/// without flashing the loading spinner.
+fn lyrics_panel_wanted(loaded_lyrics: Option<bool>, wait_done: bool, prev_open: bool) -> bool {
+    match loaded_lyrics {
+        Some(true) => true,
+        Some(false) => !wait_done,
+        None => prev_open,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PanelState {
+    pass: u64,
+    tab: NpTab,
+    last_panel: NpTab,
+    lyrics_open: bool,
+    want: bool,
+}
+
+/// The side panel (lyrics / up next / comments) slides in and out when toggled or when
+/// switching between songs with and without lyrics. Called again in the same pass it gives
+/// the same answer.
 fn panel_motion(app: &App, ctx: &egui::Context, track_id: &str, no_lyrics: bool, now: f64) -> PanelMotion {
-    let last_id = egui::Id::unique("np-last-panel");
-    let tab = if app.np_tab == NpTab::Art {
-        ctx.data(|d| d.get_temp(last_id)).unwrap_or(NpTab::Lyrics)
-    } else {
-        ctx.data_mut(|d| d.insert_temp(last_id, app.np_tab));
-        app.np_tab
+    let state_id = egui::Id::unique("np-panel-state");
+    let pass = ctx.cumulative_pass_nr();
+    let prev = ctx.data(|d| d.get_temp::<PanelState>(state_id));
+    let state = match prev {
+        Some(s) if s.pass == pass => s,
+        prev => {
+            let mut last_panel = prev.map_or(NpTab::Lyrics, |s| s.last_panel);
+            if app.np_tab != NpTab::Art {
+                last_panel = app.np_tab;
+            }
+            // Manually switching into Lyrics opens the panel even while lyrics are loading.
+            let mut lyrics_open = prev.is_none_or(|s| s.lyrics_open);
+            if app.np_tab == NpTab::Lyrics && prev.is_some_and(|s| s.tab != NpTab::Lyrics) {
+                lyrics_open = true;
+            }
+            let want = match app.np_tab {
+                NpTab::Art => false,
+                NpTab::UpNext | NpTab::Comments => true,
+                NpTab::Lyrics => {
+                    let loaded_lyrics = if no_lyrics {
+                        Some(false)
+                    } else if app.lyrics.is_some() {
+                        Some(true)
+                    } else {
+                        None
+                    };
+                    let wait = app.look().now_playing.no_lyrics.center_after;
+                    let wait_done = if loaded_lyrics == Some(false) && wait > 0.0 && lyrics_open {
+                        // A while in its usual place, then smoothly over to the middle.
+                        let since = ctx.memory_mut(|m| *m.data.get_temp_mut_or_insert_with(egui::Id::unique(("no-lyrics-wait", track_id)), || now));
+                        if now - since < wait as f64 {
+                            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait as f64 - (now - since) + 0.01));
+                            false
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    };
+                    let open = lyrics_panel_wanted(loaded_lyrics, wait_done, lyrics_open);
+                    lyrics_open = open;
+                    open
+                }
+            };
+            let next = PanelState { pass, tab: app.np_tab, last_panel, lyrics_open, want };
+            ctx.data_mut(|d| d.insert_temp(state_id, next));
+            next
+        }
     };
-    let shown = ctx.animate_bool_with_time(egui::Id::unique("np-panel"), app.np_tab != NpTab::Art, 0.6 * theme::SPEED);
-    if shown > 0.0 && shown < 1.0 {
+    let p = ctx.animate_bool_with_time(egui::Id::unique("np-panel"), state.want, 0.6 * theme::SPEED);
+    if p > 0.0 && p < 1.0 {
         // Every frame while sliding, not the now-playing view's usual 30 fps.
         ctx.request_repaint();
     }
-    let wait = app.look().now_playing.no_lyrics.center_after;
-    let p = if tab == NpTab::Lyrics && no_lyrics {
-        if wait > 0.0 {
-            // A while in its usual place, then over to the middle.
-            let since = ctx.memory_mut(|m| *m.data.get_temp_mut_or_insert_with(egui::Id::unique(("no-lyrics-wait", track_id)), || now));
-            if now - since < wait as f64 {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait as f64 - (now - since) + 0.01));
-            }
-            1.0 - ctx.animate_bool_with_time(egui::Id::unique(("no-lyrics-move", track_id)), now - since >= wait as f64, 0.6)
-        } else {
-            0.0
-        }
-    } else {
-        shown
-    };
     // Whichever is leaving slides and fades out over the first 45%, then the other
     // comes in over the last 70%, both easing out, in either direction.
-    let (panel_vis, art_vis) = if app.np_tab != NpTab::Art {
+    let (panel_vis, art_vis) = if state.want {
         (theme::ease_out((p - 0.3) / 0.7), 1.0 - theme::ease_out(p / 0.45))
     } else {
         let q = 1.0 - p;
         (1.0 - theme::ease_out(q / 0.45), theme::ease_out((q - 0.3) / 0.7))
     };
-    PanelMotion { tab, p, panel_vis, art_vis }
+    PanelMotion { tab: state.last_panel, p, panel_vis, art_vis }
 }
 
 /// What's under the header: the video, or the cover and the panel beside it.
@@ -2374,6 +2451,11 @@ fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics:
                     lyric_options(app, ui);
                     menu_divider(ui);
                 }
+                // Not in a jam: pausing would pause everyone in it.
+                if !app.jam.active() {
+                    sleep_row(app, ui);
+                    menu_divider(ui);
+                }
                 vinyl_options(app, ui);
                 menu_divider(ui);
                 menu_caption(ui, "AMBIENT");
@@ -2419,6 +2501,34 @@ fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics:
     open
 }
 
+/// The sleep timer on one row, with what's left on it; the choices open beside the menu.
+fn sleep_row(app: &mut App, ui: &mut Ui) {
+    let minutes = |m: u64| crate::tr!("player-sleep-minutes", minutes = m);
+    let left = match app.sleep {
+        None => crate::tr!("player-sleep-off").to_owned(),
+        Some(Sleep::SongEnd) => crate::tr!("player-sleep-song-end").to_owned(),
+        Some(Sleep::At(at)) => minutes(at.saturating_duration_since(Instant::now()).as_secs().div_ceil(60)),
+    };
+    let mut pick = None;
+    submenu_row(ui, crate::tr!("player-sleep-timer"), &left, None, true, |ui| {
+        widgets::menu_body(ui, 200.0);
+        if widgets::menu_choice(ui, crate::tr!("player-sleep-off"), app.sleep.is_none()) {
+            pick = Some(None);
+        }
+        for m in [15, 30, 45, 60] {
+            if widgets::menu_choice(ui, &minutes(m), false) {
+                pick = Some(Some(Sleep::At(Instant::now() + Duration::from_secs(m * 60))));
+            }
+        }
+        if widgets::menu_choice(ui, crate::tr!("player-sleep-song-end"), app.sleep == Some(Sleep::SongEnd)) {
+            pick = Some(Some(Sleep::SongEnd));
+        }
+    });
+    if let Some(sleep) = pick {
+        app.set_sleep(sleep);
+    }
+}
+
 fn lyric_options(app: &mut App, ui: &mut Ui) {
     let Some((id, set)) = app.lyrics.as_ref() else { return };
     let id = id.clone();
@@ -2427,45 +2537,26 @@ fn lyric_options(app: &mut App, ui: &mut Ui) {
     let n = available.len();
     let mut pick = None;
     // One row, the source shown on it; the others open beside the menu.
-    let label = crate::tr!("player-lyrics-source");
-    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), if n > 1 { Sense::click() } else { Sense::hover() });
-    let resp = named(resp, label);
-    let resp = if n == 1 { resp.on_hover_text(crate::tr!("player-only-lyrics-source")) } else { resp };
-    let open = egui::Popup::is_id_open(ui.ctx(), egui::containers::menu::SubMenu::id_from_widget_id(resp.id));
-    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), n > 1 && (resp.hovered() || open), 0.12);
-    if h > 0.0 {
-        ui.painter().rect_filled(row, theme::menu_item_radius(), theme::glass(0.08 * h));
-    }
-    let arrow = if n > 1 { 22.0 } else { 0.0 };
-    let name_g = widgets::galley(ui, shown.name(), theme::regular(13.0), theme::text_dim(), row.width() * 0.45);
-    let name_x = row.right() - 12.0 - arrow - name_g.size().x;
-    let label_max_w = (name_x - 20.0 - (row.left() + 12.0)).max(50.0);
-    let label_g = widgets::galley(ui, label, theme::regular(14.0), theme::text(), label_max_w);
-    ui.painter().galley(pos2(row.left() + 12.0, row.center().y - label_g.size().y / 2.0), label_g, theme::text());
+    let label = if n > 1 { crate::tr!("player-lyrics-source") } else { crate::tr!("player-only-lyrics-source") };
     let shown_sync = set.get(shown).map(|l| match l.sync {
         crate::lyrics::Sync::Word => shown.sync(),
         crate::lyrics::Sync::Line => crate::lyrics::SyncKind::Line,
         crate::lyrics::Sync::None => crate::lyrics::SyncKind::Unsynced,
     }).unwrap_or_else(|| shown.sync());
-    ui.painter().circle_filled(pos2(name_x - 9.0, row.center().y), 3.0, sync_color(shown_sync));
-    ui.painter().galley(pos2(name_x, row.center().y - name_g.size().y / 2.0), name_g, theme::text_dim());
-    if n > 1 {
-        widgets::icon_at(ui, pos2(row.right() - 18.0, row.center().y), icon::CHEVRON_RIGHT, 14.0, theme::text_dim());
-        egui::containers::menu::SubMenu::new().show(ui, &resp, |ui| {
-            widgets::menu_body(ui, 300.0);
-            for p in &available {
-                let actual_sync = set.get(*p).map(|l| match l.sync {
-                    crate::lyrics::Sync::Word => p.sync(),
-                    crate::lyrics::Sync::Line => crate::lyrics::SyncKind::Line,
-                    crate::lyrics::Sync::None => crate::lyrics::SyncKind::Unsynced,
-                }).unwrap_or_else(|| p.sync());
-                if source_row(ui, p.name(), actual_sync, *p == shown) {
-                    pick = Some(*p);
-                    ui.close();
-                }
+    submenu_row(ui, label, shown.name(), Some(sync_color(shown_sync)), n > 1, |ui| {
+        widgets::menu_body(ui, 300.0);
+        for p in &available {
+            let actual_sync = set.get(*p).map(|l| match l.sync {
+                crate::lyrics::Sync::Word => p.sync(),
+                crate::lyrics::Sync::Line => crate::lyrics::SyncKind::Line,
+                crate::lyrics::Sync::None => crate::lyrics::SyncKind::Unsynced,
+            }).unwrap_or_else(|| p.sync());
+            if source_row(ui, p.name(), actual_sync, *p == shown) {
+                pick = Some(*p);
+                ui.close();
             }
-        });
-    }
+        }
+    });
     let name = crate::i18n::lyrics_name(&app.lyric_prefs.target);
     let tip = crate::tr!("player-translation-language", language = name.as_ref());
     switch_row(ui, &tip, &mut app.show_trans);
@@ -2564,6 +2655,32 @@ fn vinyl_options(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// A row naming something and what it's at (`value`, after `dot` when there is one); when
+/// `opens`, an arrow, and `contents` beside the menu on hover or click.
+fn submenu_row(ui: &mut Ui, label: &str, value: &str, dot: Option<Color32>, opens: bool, contents: impl FnOnce(&mut Ui)) {
+    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), if opens { Sense::click() } else { Sense::hover() });
+    let resp = named(resp, label);
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::containers::menu::SubMenu::id_from_widget_id(resp.id));
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), opens && (resp.hovered() || open), 0.12);
+    if h > 0.0 {
+        ui.painter().rect_filled(row, theme::menu_item_radius(), theme::glass(0.08 * h));
+    }
+    ui.painter().text(pos2(row.left() + 12.0, row.center().y), egui::Align2::LEFT_CENTER, label, theme::regular(14.0), theme::text());
+    let arrow = if opens { 22.0 } else { 0.0 };
+    let value_g = widgets::galley(ui, value, theme::regular(13.0), theme::text_dim(), row.width() * 0.5);
+    let value_x = row.right() - 12.0 - arrow - value_g.size().x;
+    if let Some(c) = dot {
+        ui.painter().circle_filled(pos2(value_x - 9.0, row.center().y), 3.0, c);
+    }
+    let value_pos = pos2(value_x, row.center().y - value_g.size().y / 2.0);
+    ui.painter().galley(value_pos, value_g.clone(), theme::text_dim());
+    widgets::tip_if_elided(ui, Rect::from_min_size(value_pos, value_g.size()), &value_g, value);
+    if opens {
+        widgets::icon_at(ui, pos2(row.right() - 18.0, row.center().y), icon::CHEVRON_RIGHT, 14.0, theme::text_dim());
+        egui::containers::menu::SubMenu::new().show(ui, &resp, contents);
+    }
+}
+
 fn menu_caption(ui: &mut Ui, text: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
     ui.painter().text(pos2(r.left() + 12.0, r.center().y + 2.0), egui::Align2::LEFT_CENTER, text.to_uppercase(), theme::semibold(11.0), theme::text_faint());
@@ -2642,4 +2759,22 @@ fn mini_text(ui: &mut Ui, text: &str, on: bool, tip: &str) -> egui::Response {
     let color = if on { gold } else { theme::with_alpha(Color32::WHITE, 0.6 + 0.35 * h) };
     ui.painter().galley_with_override_text_color(rect.center() - g.size() / 2.0, g, color);
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lyrics_panel_wanted;
+
+    #[test]
+    fn lyrics_panel_holds_state_while_loading_and_tracks_lyrics_availability() {
+        // Switching between two songs without lyrics stays centered while loading.
+        assert!(!lyrics_panel_wanted(None, true, false));
+        assert!(!lyrics_panel_wanted(Some(false), true, false));
+        // Once lyrics arrive, the panel opens.
+        assert!(lyrics_panel_wanted(Some(true), true, false));
+        // Switching away from a song with lyrics keeps the panel open while loading, then closes.
+        assert!(lyrics_panel_wanted(None, true, true));
+        assert!(lyrics_panel_wanted(Some(false), false, true));
+        assert!(!lyrics_panel_wanted(Some(false), true, true));
+    }
 }

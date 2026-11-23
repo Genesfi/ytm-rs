@@ -8,6 +8,7 @@ mod fullscreen;
 mod hls;
 mod proxy;
 mod renderer;
+mod airplay;
 mod art;
 mod audio;
 mod awake;
@@ -36,6 +37,7 @@ mod node;
 mod notify;
 mod opus;
 mod preset;
+mod recognize;
 mod remote;
 mod shader;
 mod sponsorblock;
@@ -227,6 +229,8 @@ fn main() -> eframe::Result {
             let volume = if std::env::var_os("YTM_MUTE").is_some() { 0.0 } else { volume };
 
             let device = cc.storage.and_then(|s| s.get_string("output_device")).filter(|d| !d.is_empty());
+            // Before the audio engine, which looks for a picked AirPlay speaker if it may.
+            airplay::set_allowed(cc.storage.and_then(|s| s.get_string("local_network")).is_some_and(|v| v == "1"));
 
             let (audio_tx, audio_rx) = unbounded();
             let audio = audio::spawn(volume, log_volume, device, audio_tx, wake);
@@ -352,6 +356,41 @@ fn init_logging() {
         log::error!("thread '{}' {info}", std::thread::current().name().unwrap_or("<unnamed>"));
         default(info);
     }));
+    #[cfg(windows)]
+    log_native_crashes();
+}
+
+/// A crash in native code (a graphics or audio driver, a C library) isn't a panic: Windows
+/// ends the app, and only Event Viewer says why (#219). This puts the error and the DLL
+/// it was in into the log first, then lets Windows carry on as before.
+#[cfg(windows)]
+fn log_native_crashes() {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::Diagnostics::Debug::{EXCEPTION_POINTERS, SetUnhandledExceptionFilter};
+    use windows::Win32::System::LibraryLoader::{GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW, GetModuleHandleExW};
+    unsafe extern "system" fn crashed(info: *const EXCEPTION_POINTERS) -> i32 {
+        // SAFETY: Windows hands over valid pointers (or null); the module lookup only reads.
+        unsafe {
+            if let Some(rec) = info.as_ref().and_then(|i| i.ExceptionRecord.as_ref()) {
+                let at = rec.ExceptionAddress as usize;
+                let mut module = HMODULE::default();
+                let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+                let (dll, offset) = if GetModuleHandleExW(flags, windows::core::PCWSTR(at as *const u16), &mut module).is_ok() {
+                    let mut name = [0u16; 260];
+                    let n = GetModuleFileNameW(Some(module), &mut name) as usize;
+                    (String::from_utf16_lossy(&name[..n]), at - module.0 as usize)
+                } else {
+                    ("unknown module".to_owned(), at)
+                };
+                log::error!("crash: exception {:#010x} in {dll} at +{offset:#x}", rec.ExceptionCode.0 as u32);
+                log::logger().flush();
+            }
+        }
+        // EXCEPTION_CONTINUE_SEARCH: Windows ends the app and records it, as without this.
+        0
+    }
+    // SAFETY: a plain function pointer, set once at startup.
+    unsafe { SetUnhandledExceptionFilter(Some(crashed)) };
 }
 
 /// Settings, caches and the sign-in: `data` beside the portable build's exe, else the

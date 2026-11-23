@@ -384,6 +384,13 @@ pub fn all_listed(tracks: &[Track]) -> bool {
     tracks.iter().all(|t| listed_now(&st, &videos, t))
 }
 
+/// The songs not downloaded, as last looked (see `all_listed`).
+pub fn not_listed(tracks: &[Track]) -> Vec<Track> {
+    let st = STATE.read().unwrap();
+    let videos = song_versions(&st, tracks);
+    tracks.iter().filter(|t| !listed_now(&st, &videos, t)).cloned().collect()
+}
+
 /// Whether any of these songs are downloaded, as last looked (see `all_listed`).
 pub fn any_listed(tracks: &[Track]) -> bool {
     let st = STATE.read().unwrap();
@@ -617,7 +624,11 @@ fn tag_lyrics(audio: &Path, video_id: &str, set: &LyricsSet) {
         let shift = source.and_then(|p| c.offsets.get(&format!("{video_id}|{}", p.key()))).map_or(0, |s| (s * 1000.0).round() as i32);
         tag_text(set, source, file_lyrics(), shift)
     };
-    let written = mp4ameta::Tag::read_from_path(audio).and_then(|mut tag| {
+    // Written to a copy that then takes the file's place, as a download is: a write cut
+    // short (the app quit, the disk full) leaves the song as it was, not half moved along.
+    let part = audio.with_extension("m4a.lyrics.part");
+    let written = (|| -> anyhow::Result<()> {
+        let mut tag = mp4ameta::Tag::read_from_path(audio)?;
         if tag.lyrics() == want.as_deref() {
             return Ok(());
         }
@@ -625,10 +636,14 @@ fn tag_lyrics(audio: &Path, video_id: &str, set: &LyricsSet) {
             Some(w) => tag.set_lyrics(w),
             None => tag.remove_lyrics(),
         }
-        tag.write_to_path(audio)
-    });
+        std::fs::copy(audio, &part)?;
+        tag.write_to_path(&part)?;
+        std::fs::rename(&part, audio)?;
+        Ok(())
+    })();
     if let Err(e) = written {
-        log::warn!("couldn't tag the lyrics of {}: {e}", audio.display());
+        let _ = std::fs::remove_file(&part);
+        log::warn!("couldn't tag the lyrics of {}: {e:#}", audio.display());
     }
 }
 
@@ -1005,6 +1020,7 @@ mod tests {
         let written: HashMap<String, Entry> = serde_json::from_slice(&std::fs::read(dir.join("downloads.json")).unwrap()).unwrap();
         assert_eq!((written["c"].list.as_deref(), written["a"].list.as_deref()), (Some("PL1"), None));
         assert!(any_listed(&[song("x", "X"), song("c", "C")]) && !all_listed(&[song("x", "X"), song("c", "C")]));
+        assert_eq!(not_listed(&[song("x", "X"), song("c", "C")]).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["x"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

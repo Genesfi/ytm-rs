@@ -12,7 +12,7 @@ use crate::ytm::HomePage;
 
 use crate::remote::{Cmd, RepeatMode};
 
-use super::{Action, App, Dialog, HomeState, LibTab, Page, PlayingAs, Repeat, dev_var};
+use super::{Action, App, Dialog, HomeState, LibTab, Page, PlayingAs, Repeat, Sleep, dev_var};
 
 impl App {
     pub(super) fn pump(&mut self, ctx: &egui::Context, now: f64) {
@@ -30,6 +30,7 @@ impl App {
         while let Ok(ev) = self.ch.audio_rx.try_recv() {
             match ev {
                 AudioEvent::Finished { generation } if generation == self.generation && self.jam.guest() => {}
+                AudioEvent::Finished { generation } if generation == self.generation && self.sleep == Some(Sleep::SongEnd) => self.sleep_at_song_end(),
                 AudioEvent::Finished { generation } if generation == self.generation => {
                     if self.repeats_one() {
                         self.play_current();
@@ -46,7 +47,8 @@ impl App {
                 AudioEvent::Finished { .. } => {}
                 // Crossfade into the next song, or into the song again on Repeat one; the
                 // end of the queue waits for the end.
-                AudioEvent::Ending { generation } if generation == self.generation && !self.jam.guest() => {
+                // With the sleep timer set to the song's end, it plays out instead (`Finished`).
+                AudioEvent::Ending { generation } if generation == self.generation && !self.jam.guest() && self.sleep != Some(Sleep::SongEnd) => {
                     self.handoff = true;
                     if self.repeats_one() {
                         self.play_current();
@@ -56,6 +58,8 @@ impl App {
                     self.handoff = false;
                 }
                 AudioEvent::Ending { .. } => {}
+                AudioEvent::PrepareNext { generation } => self.stage_next(generation),
+                AudioEvent::GaplessAdvanced { generation } => self.on_gapless_advanced(generation),
                 AudioEvent::Interrupted { generation, at, failure } if generation == self.generation => self.recover(at, failure),
                 AudioEvent::Interrupted { .. } => {}
                 AudioEvent::Error(e) => self.toast(e),
@@ -375,7 +379,17 @@ impl App {
                     self.show_cover_colours(now);
                 }
             }
-            Resp::Radio { seed, tracks } => {
+            // Smart shuffle's: only the latest one asked for, while the queue is still
+            // shuffled with that song playing. Never autoplay's, which adds to the end.
+            Resp::Radio { seed, tracks, smart: true } => {
+                if self.smart_seed.as_ref() == Some(&seed) {
+                    self.smart_seed = None;
+                    if self.smart_shuffle && self.current_id() == Some(seed.as_str()) {
+                        self.queue.mix_in(tracks);
+                    }
+                }
+            }
+            Resp::Radio { seed, tracks, smart: false } => {
                 self.radio_pending = false;
                 // For a queue since replaced: the one playing now gets its own.
                 if !self.queue.tracks.iter().any(|t| t.id == seed) {
@@ -594,6 +608,14 @@ impl App {
                     if self.jam.active() {
                         self.play_listed_upload();
                     }
+                }
+            }
+            Resp::StagedSong { generation, listed, song } => {
+                if let Some(staged) = &mut self.staged
+                    && staged.generation == generation
+                    && staged.track.id == listed
+                {
+                    staged.song = Some(song);
                 }
             }
             Resp::MusicVideo { song, video } => {

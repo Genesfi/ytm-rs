@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 
 use egui::{Align2, Color32, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
 
+use super::arrive;
 use super::widgets::{self, RowOpts, card, chip, h_scroll, named, paint_cover, pill, shelf_header, track_row};
 use super::find::{ListFind, Sort};
 use super::row_drag::{self, RowDrag};
@@ -19,6 +20,7 @@ use crate::ytm::Scope;
 const CARD: f32 = 180.0;
 
 pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
+    arrive::page(ui.ctx(), app.page_changed);
     let t = theme::ease_out(((now - app.page_changed) / 0.32) as f32);
     let rise = app.look().app.page_rise_px * (1.0 - t);
     if rise > 0.0 {
@@ -139,7 +141,7 @@ impl Rows {
             accent: self.accent,
             time: self.now,
             liked: liked.contains(&t.id),
-            added_by: None,
+            added: None,
             pick: false,
             selected: None,
             remove: None,
@@ -197,12 +199,13 @@ fn card_row(ui: &mut Ui, id: &str, title: &str, cards: &[Card], acts: &mut Vec<A
     if cards.is_empty() {
         return;
     }
-    let (l, r) = shelf_header(ui, title, None, None, true);
+    let g = arrive::group(ui, id);
+    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, None, None, true));
     let nudge = r as i32 - l as i32;
     h_scroll(ui, id, nudge, cards.len(), CARD, 18.0, |ui| {
         ui.spacing_mut().item_spacing.x = 18.0;
-        for c in cards {
-            card(ui, c, CARD, false, None, acts);
+        for (i, c) in cards.iter().enumerate() {
+            arrive::item(ui, g, 1 + i, 16.0, |ui| card(ui, c, CARD, false, None, acts));
         }
     });
 }
@@ -211,7 +214,8 @@ fn card_row(ui: &mut Ui, id: &str, title: &str, cards: &[Card], acts: &mut Vec<A
 /// song starts its radio. Returns whether the arrows reached the end.
 #[allow(clippy::too_many_arguments)]
 fn song_grid(ui: &mut Ui, rows_ctx: &Rows, liked: &HashSet<String>, acts: &mut Vec<Action>, id: &str, title: &str, strap: Option<&str>, tracks: &[Track], rows: usize) -> bool {
-    let (l, r) = shelf_header(ui, title, strap, None, true);
+    let g = arrive::group(ui, id);
+    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, strap, None, true));
     let nudge = r as i32 - l as i32;
     let col_w = (ui.available_width() / 2.6).clamp(300.0, 420.0);
     let tracks: Vec<&Track> = tracks.iter().filter(|t| rows_ctx.shows(t)).collect();
@@ -224,7 +228,7 @@ fn song_grid(ui: &mut Ui, rows_ctx: &Rows, liked: &HashSet<String>, acts: &mut V
                 ui.vertical(|ui| {
                     for (i, t) in col.iter().enumerate() {
                         let o = rows_ctx.opts(liked, t, None, false);
-                        if track_row(ui, t, &o, acts).clicked() {
+                        if arrive::item(ui, g, 1 + c + i, 10.0, |ui| track_row(ui, t, &o, acts)).clicked() {
                             picked = Some(c * rows + i);
                         }
                     }
@@ -266,6 +270,7 @@ fn list(ui: &mut Ui, rows: &Rows, liked: &HashSet<String>, tracks: &[Track], sho
     let n = shown.as_ref().map_or(tracks.len(), Vec::len);
     // Rows on show changing mid-drag (find typed into) make it another list: the drag ends.
     let (drag_list, top) = (egui::Id::unique(("list", page)).with(&shown), ui.cursor().top());
+    let g = arrive::group(ui, ("list", page));
     widgets::visible_rows(ui, n, |ui, k| {
         let i = shown.as_ref().map_or(k, |s| s[k]);
         let t = &tracks[i];
@@ -280,7 +285,7 @@ fn list(ui: &mut Ui, rows: &Rows, liked: &HashSet<String>, tracks: &[Track], sho
                 plays_col,
                 ..rows.opts(liked, t, number(i, t), show_album)
             };
-            if track_row(ui, t, &o, acts).clicked() {
+            if arrive::item(ui, g, k, 10.0, |ui| track_row(ui, t, &o, acts)).clicked() {
                 if selecting || mods.command || mods.shift {
                     // A run of picks is of the rows on show, in their order on screen.
                     sel.pick(page, i, mods.shift, shown.as_deref());
@@ -528,10 +533,11 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
         && !h.chips.is_empty()
     {
         ui.add_space(6.0);
+        let g = arrive::group(ui, "home-chips");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
-            for c in &h.chips {
-                if chip(ui, browse_label(&c.title), c.selected).clicked() {
+            for (i, c) in h.chips.iter().enumerate() {
+                if arrive::item(ui, g, i, 6.0, |ui| chip(ui, browse_label(&c.title), c.selected)).clicked() {
                     let params = if c.selected { None } else { c.params.clone() };
                     app.actions.push(Action::HomeChip(params));
                 }
@@ -634,13 +640,14 @@ fn played_lately_shelf(app: &mut App, ui: &mut Ui) {
 /// Cards scrolling sideways under a shelf's title.
 #[allow(clippy::too_many_arguments)]
 fn cards_shelf(ui: &mut Ui, liked: &HashSet<String>, acts: &mut Vec<Action>, id: &str, title: &str, strap: Option<&str>, thumb: Option<&str>, cards: &[&Card]) {
-    let (l, r) = shelf_header(ui, title, strap, thumb, true);
+    let g = arrive::group(ui, id);
+    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, strap, thumb, true));
     let nudge = r as i32 - l as i32;
     h_scroll(ui, id, nudge, cards.len(), CARD, 18.0, |ui| {
         ui.spacing_mut().item_spacing.x = 18.0;
-        for c in cards {
+        for (i, c) in cards.iter().enumerate() {
             let is_liked = matches!(&c.target, Target::Song(t) if liked.contains(&t.id));
-            card(ui, c, CARD, is_liked, None, acts);
+            arrive::item(ui, g, 1 + i, 16.0, |ui| card(ui, c, CARD, is_liked, None, acts));
         }
     });
 }
@@ -721,7 +728,8 @@ fn browse_label(title: &str) -> &str {
 
 /// A group of Moods & genres: its categories in as many columns as fit, each opening its page.
 fn mood_grid(ui: &mut Ui, g: &crate::ytm::MoodGroup, acts: &mut Vec<Action>) {
-    shelf_header(ui, browse_label(&g.title), None, None, false);
+    let arr = arrive::group(ui, ("moods", &g.title));
+    arrive::item(ui, arr, 0, 10.0, |ui| shelf_header(ui, browse_label(&g.title), None, None, false));
     let gap = 14.0;
     let w = ui.available_width();
     let cols = ((w + gap) / (190.0 + gap)).floor().max(1.0);
@@ -729,8 +737,8 @@ fn mood_grid(ui: &mut Ui, g: &crate::ytm::MoodGroup, acts: &mut Vec<Action>) {
     let bw = ((w - gap * (cols - 1.0)) / cols - 0.5).max(60.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(gap, gap);
-        for m in &g.moods {
-            if mood_button(ui, m, bw).clicked() {
+        for (i, m) in g.moods.iter().enumerate() {
+            if arrive::item(ui, arr, 1 + i / 2, 10.0, |ui| mood_button(ui, m, bw)).clicked() {
                 acts.push(Action::Go(Page::Mood(m.params.clone())));
             }
         }
@@ -836,7 +844,7 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
     // Top result: the first artist when the query names one, otherwise the first song.
     let top_card = |ui: &mut Ui, acts: &mut Vec<Action>| {
         if let Some(top) = r.artists.first().filter(|a| a.title.eq_ignore_ascii_case(q.trim())) {
-            top_result(ui, top, false, acts);
+            top_result(ui, top, false, false, acts);
         } else if let Some(t) = tracks.first().copied() {
             let c = Card {
                 title: t.title.clone(),
@@ -846,7 +854,7 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
                 round: false,
                 links: t.artists.clone(),
             };
-            top_result(ui, &c, pick, acts);
+            top_result(ui, &c, liked.contains(&t.id), pick, acts);
         }
     };
     let mut songs = |ui: &mut Ui, acts: &mut Vec<Action>| {
@@ -854,12 +862,13 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
             ui.label(RichText::new(crate::tr!("nav-songs")).font(theme::bold(24.0)));
             ui.add_space(8.0);
             let plays_col = tracks.iter().take(4).any(|t| t.plays.is_some());
+            let g = arrive::group(ui, "search-songs");
             for (i, t) in tracks.iter().copied().take(4).enumerate() {
                 // Its own scope, so a picked-up row dims alone.
                 ui.push_id(i, |ui| {
                     row_drag::grip(ui, drag, ids("songs"), i, t);
                     let o = RowOpts { pick, plays_col, ..rows.opts(liked, t, None, false) };
-                    if track_row(ui, t, &o, acts).clicked() {
+                    if arrive::item(ui, g, i, 10.0, |ui| track_row(ui, t, &o, acts)).clicked() {
                         acts.push(play(t));
                     }
                 });
@@ -904,11 +913,12 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
         ui.label(RichText::new(crate::tr!("nav-more-songs")).font(theme::bold(24.0)));
         ui.add_space(10.0);
         let plays_col = tracks.iter().skip(4).any(|t| t.plays.is_some());
+        let g = arrive::group(ui, "search-more");
         for (i, t) in tracks.iter().copied().skip(4).enumerate() {
             ui.push_id(("more", i), |ui| {
                 row_drag::grip(ui, drag, ids("more"), i, t);
                 let o = RowOpts { pick, plays_col, ..rows.opts(liked, t, None, true) };
-                if track_row(ui, t, &o, acts).clicked() {
+                if arrive::item(ui, g, i, 10.0, |ui| track_row(ui, t, &o, acts)).clicked() {
                     acts.push(play(t));
                 }
             });
@@ -979,7 +989,7 @@ const TOP_RESULT_GAP: f32 = 24.0;
 const SONGS_MIN_W: f32 = 320.0;
 
 /// `pick`: choosing a transfer match, so clicking a song picks it.
-fn top_result(ui: &mut Ui, c: &Card, pick: bool, acts: &mut Vec<Action>) {
+fn top_result(ui: &mut Ui, c: &Card, liked: bool, pick: bool, acts: &mut Vec<Action>) {
     ui.vertical(|ui| {
         ui.label(RichText::new(crate::tr!("nav-top-result")).font(theme::bold(24.0)));
         ui.add_space(8.0);
@@ -1004,6 +1014,11 @@ fn top_result(ui: &mut Ui, c: &Card, pick: bool, acts: &mut Vec<Action>) {
         ui.painter().circle_filled(pc, 26.0, theme::with_alpha(Color32::WHITE, 0.4 + 0.6 * h));
         let nudge = if playing { 0.0 } else { 1.5 };
         widgets::play_pause_glyph(ui, pc + vec2(nudge, 0.0), 10.0, Color32::from_gray(15), playing);
+        let behavior = if matches!(c.target, Target::Song(_)) { egui::PopupCloseBehavior::CloseOnClickOutside } else { egui::PopupCloseBehavior::CloseOnClick };
+        // Right-click anywhere on the card opens its menu, even over the play button or a linked name.
+        widgets::right_click_menu(&resp)
+            .close_behavior(behavior)
+            .show(|ui| widgets::card_menu_contents(ui, c, liked, None, acts));
         if p.clicked() {
             acts.push(match &c.target {
                 _ if active.is_some() => Action::TogglePlay,
@@ -1081,8 +1096,12 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                 }
                 if let Some(d) = c.description.as_deref().filter(|d| !d.trim().is_empty()) {
                     ui.add_space(6.0);
-                    let g = widgets::galley_wrapped(ui, d.trim(), theme::regular(13.5), theme::text_dim(), ui.available_width(), 2);
-                    ui.label(g);
+                    let trimmed = d.trim();
+                    let g = widgets::galley_wrapped(ui, trimmed, theme::regular(13.5), theme::text_dim(), ui.available_width(), 2);
+                    let resp = ui.label(g.clone());
+                    if widgets::is_elided(&g, trimmed) {
+                        resp.on_hover_text(trimmed);
+                    }
                 }
             });
             ui.add_space(16.0);
@@ -1358,8 +1377,12 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     card_row(ui, "a-sim", crate::tr!("nav-similar-artists"), &a.similar, acts);
     if let Some(d) = a.description.as_deref().filter(|d| !d.trim().is_empty()) {
         shelf_header(ui, crate::tr!("settings-about"), None, None, false);
-        let g = widgets::galley_wrapped(ui, d.trim(), theme::regular(14.5), theme::text_dim(), ui.available_width().min(820.0), 8);
-        ui.label(g);
+        let trimmed = d.trim();
+        let g = widgets::galley_wrapped(ui, trimmed, theme::regular(14.5), theme::text_dim(), ui.available_width().min(820.0), 8);
+        let resp = ui.label(g.clone());
+        if widgets::is_elided(&g, trimmed) {
+            resp.on_hover_text(trimmed);
+        }
     }
 }
 
@@ -1396,11 +1419,12 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
     }
     // `pinned`: on Library › Playlists, where playlists are pinned.
     let grid = |ui: &mut Ui, cards: &[Card], order: &[usize], pinned: Option<&[String]>, acts: &mut Vec<Action>| {
+        let g = arrive::group(ui, "library-grid");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(20.0, 22.0);
-            for &i in order {
+            for (k, &i) in order.iter().enumerate() {
                 let pin = pinned.map(|p| matches!(&cards[i].target, Target::Playlist(id) if p.contains(id)));
-                card(ui, &cards[i], CARD, false, pin, acts);
+                arrive::item(ui, g, k, 16.0, |ui| card(ui, &cards[i], CARD, false, pin, acts));
             }
         });
     };
@@ -1775,7 +1799,7 @@ fn settings_tab(app: &mut App, ui: &mut Ui, tab: SettingsTab) {
             settings_language(app, ui);
             settings_song_info(app, ui);
             settings_window(app, ui);
-            settings_downloads(ui);
+            settings_downloads(app, ui);
             super::transfer::settings_section(app, ui);
             settings_section(ui, tr!("settings-network"), None, None, |ui| network(app, ui));
             // Last, as most apps keep it.
@@ -1972,6 +1996,27 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
             toggle(ui, &mut app.autoplay, tr!("settings-autoplay"));
         });
         divider(ui);
+        setting_row(ui, tr!("settings-smart-shuffle"), Some(tr!("settings-smart-shuffle-desc")), |ui| {
+            if toggle(ui, &mut app.smart_shuffle, tr!("settings-smart-shuffle")).changed() {
+                if app.smart_shuffle {
+                    app.smart_mix();
+                } else {
+                    app.queue.drop_mixed();
+                }
+            }
+        });
+        divider(ui);
+        // Off (and shown off) while crossfade is on: songs overlap rather than chaining end to end.
+        ui.add_enabled_ui(!app.crossfade, |ui| {
+            setting_row(ui, tr!("settings-gapless-playback"), Some(tr!("settings-gapless-playback-desc")), |ui| {
+                let mut on = !app.crossfade && app.gapless;
+                if toggle(ui, &mut on, tr!("settings-gapless-playback")).changed() {
+                    app.gapless = on;
+                    app.set_gapless();
+                }
+            });
+        });
+        divider(ui);
         setting_row(ui, tr!("settings-crossfade-songs"), Some(tr!("settings-crossfade-songs-desc")), |ui| {
             if toggle(ui, &mut app.crossfade, tr!("settings-crossfade-songs")).changed() {
                 app.set_crossfade();
@@ -1989,6 +2034,12 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
                 toggle(ui, &mut app.crossfade_skips, tr!("settings-crossfade-when-skipping"));
             });
         }
+        divider(ui);
+        setting_row(ui, tr!("settings-skip-silence"), Some(tr!("settings-skip-silence-desc")), |ui| {
+            if toggle(ui, &mut app.skip_silence, tr!("settings-skip-silence")).changed() {
+                app.audio.set_skip_silence(app.skip_silence);
+            }
+        });
         divider(ui);
         setting_row(ui, tr!("settings-hide-explicit-songs"), Some(tr!("settings-hide-explicit-songs-desc")), |ui| {
             if toggle(ui, &mut app.hide_explicit, tr!("settings-hide-explicit-songs")).changed() {
@@ -2194,7 +2245,7 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
 }
 
 /// Settings › Downloads.
-fn settings_downloads(ui: &mut Ui) {
+fn settings_downloads(app: &mut App, ui: &mut Ui) {
     settings_section(ui, tr!("settings-downloads"), None, Some(tr!("settings-downloads-note")), |ui| {
         let folder = crate::downloads::folder().display().to_string();
         setting_row(ui, tr!("settings-download-folder"), Some(&folder), |ui| {
@@ -2204,6 +2255,12 @@ fn settings_downloads(ui: &mut Ui) {
             ui.add_space(6.0);
             if pill(ui, tr!("settings-open"), Some(icon::FOLDER_OPEN), false).clicked() {
                 crate::downloads::open_folder();
+            }
+        });
+        divider(ui);
+        setting_row(ui, tr!("settings-download-liked"), Some(tr!("settings-download-liked-desc")), |ui| {
+            if toggle(ui, &mut app.download_liked, tr!("settings-download-liked")).changed() && app.download_liked {
+                app.download_all_liked();
             }
         });
         divider(ui);
@@ -2545,6 +2602,12 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
         divider(ui);
         setting_row(ui, "Ambient beat", Some("Breathing accent glow behind Now playing that pulses to the bass beat."), |ui| {
             toggle(ui, &mut app.ambient_beat, "Ambient beat");
+        });
+        divider(ui);
+        setting_row(ui, tr!("settings-visualizer"), Some(tr!("settings-visualizer-desc")), |ui| {
+            if toggle(ui, &mut app.visualizer, tr!("settings-visualizer")).changed() {
+                app.audio.set_spectrum(app.visualizer);
+            }
         });
         divider(ui);
         setting_row(ui, tr!("settings-dim-bright-covers"), Some(tr!("settings-dim-bright-covers-desc")), |ui| {
@@ -3251,6 +3314,13 @@ fn network(app: &mut App, ui: &mut Ui) {
         }
     });
     divider(ui);
+    let label = tr!("settings-local-network");
+    setting_row(ui, label, Some(tr!("settings-local-network-desc")), |ui| {
+        if toggle(ui, &mut app.local_network, label).changed() {
+            app.set_local_network();
+        }
+    });
+    divider(ui);
     let same = |a: &Setting, b: &Setting| std::mem::discriminant(a) == std::mem::discriminant(b);
     let mut pick = None;
     setting_row(ui, tr!("settings-proxy"), Some(tr!("settings-proxy-desc")), |ui| {
@@ -3493,33 +3563,68 @@ fn system_default() -> &'static str {
     tr!("settings-windows-default")
 }
 
+/// A device's name in the list, AirPlay speakers marked as such.
+fn device_label(id: &str, name: &str) -> String {
+    if id.starts_with(crate::airplay::PREFIX) { tr!("settings-airplay-device", name = name) } else { name.to_owned() }
+}
+
 fn output_device_picker(app: &mut App, ui: &mut Ui) {
+    // Found on the network in the background, so read afresh each frame.
+    let speakers = crate::airplay::speakers();
     let current = match &app.output_device {
         None => system_default().to_owned(),
-        Some((id, name)) => match app.output_devices.iter().find(|d| d.id == *id) {
-            Some(d) => d.name.clone(),
-            None if app.output_devices.is_empty() => name.clone(),
-            None => tr!("settings-not-connected", name = name.as_str()),
+        Some((id, name)) => match app.output_devices.iter().map(|d| (&d.id, &d.name)).chain(speakers.iter().map(|s| (&s.id, &s.name))).find(|(d, _)| *d == id) {
+            Some((_, n)) => device_label(id, n),
+            None if app.output_devices.is_empty() => device_label(id, name),
+            None => tr!("settings-not-connected", name = device_label(id, name)),
         },
     };
     let btn = dropdown_button(ui, &current, 210.0, tr!("settings-output-device"));
-    // Listed when opened, so a device that just connected shows up.
-    if btn.clicked() || app.output_devices.is_empty() {
+    output_device_menu(app, &btn, widgets::menu_popup(&btn), 340.0, &speakers);
+}
+
+/// The output devices to pick from, in `popup` (opened by `btn`): sound cards, then AirPlay
+/// speakers with its mark. For Settings › Output device and the player bar's button.
+pub(super) fn output_device_menu(app: &mut App, btn: &egui::Response, popup: egui::Popup, width: f32, speakers: &[crate::airplay::Speaker]) {
+    // Listed when opened, so a device that just connected shows up. Only then: the player
+    // bar draws this every frame, and listing asks the system each time.
+    if btn.clicked() {
         app.output_devices = crate::audio::output_devices();
     }
+    if btn.clicked() {
+        crate::airplay::discover();
+    }
     let mut pick: Option<Option<(String, String)>> = None;
-    widgets::menu_popup(&btn).show(|ui| {
-        widgets::menu_body(ui, 340.0);
+    popup.show(|ui| {
+        // Speakers turn up as they answer.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        widgets::menu_body(ui, width);
         dropdown_list(ui, 320.0, |ui| {
             if option_row(ui, system_default(), app.output_device.is_none()).clicked() {
                 pick = Some(None);
                 ui.close();
             }
-            for d in &app.output_devices {
-                if option_row(ui, &d.name, app.output_device.as_ref().is_some_and(|(id, _)| *id == d.id)).clicked() {
-                    pick = Some(Some((d.id.clone(), d.name.clone())));
+            let cards = app.output_devices.iter().map(|d| (&d.id, &d.name, None));
+            let devices = cards.chain(speakers.iter().map(|s| (&s.id, &s.name, Some(theme::icon::AIRPLAY))));
+            for (id, name, mark) in devices {
+                if option_row_marked(ui, name, mark, app.output_device.as_ref().is_some_and(|(cur, _)| cur == id)).clicked() {
+                    pick = Some(Some((id.clone(), name.clone())));
                     ui.close();
                 }
+            }
+            // AirPlay speakers need the network looked over, which Windows' firewall asks
+            // about: only once it's asked for. The menu stays open for them to turn up.
+            if !app.local_network {
+                widgets::menu_divider(ui);
+                if option_row_marked(ui, tr!("settings-local-network"), Some(theme::icon::AIRPLAY), false).clicked() {
+                    app.local_network = true;
+                    app.set_local_network();
+                }
+            } else if speakers.is_empty() {
+                widgets::menu_divider(ui);
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+                widgets::icon_at(ui, pos2(r.left() + 20.0, r.center().y), theme::icon::AIRPLAY, 15.0, theme::text_faint());
+                widgets::text_at(ui, pos2(r.left() + 38.0, r.center().y - 8.0), tr!("settings-airplay-searching"), theme::regular(13.0), theme::text_faint(), r.width() - 50.0);
             }
         });
     });
@@ -3768,6 +3873,11 @@ fn dropdown_list(ui: &mut Ui, max_height: f32, add: impl FnOnce(&mut Ui)) {
 
 /// A dropdown option: hover glass, and a check on the chosen one.
 pub(super) fn option_row(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
+    option_row_marked(ui, label, None, selected)
+}
+
+/// An option with an icon before it (an AirPlay speaker's).
+fn option_row_marked(ui: &mut Ui, label: &str, mark: Option<char>, selected: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
     let resp = widgets::named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
@@ -3775,7 +3885,12 @@ pub(super) fn option_row(ui: &mut Ui, label: &str, selected: bool) -> egui::Resp
         ui.painter().rect_filled(rect, theme::menu_item_radius(), theme::glass(0.05 * selected as u8 as f32 + 0.08 * h));
     }
     let font = if selected { theme::semibold(14.0) } else { theme::regular(14.0) };
-    widgets::text_at(ui, pos2(rect.left() + 12.0, rect.center().y - 9.0), label, font, theme::text(), rect.width() - 44.0);
+    let mut x = rect.left() + 12.0;
+    if let Some(m) = mark {
+        widgets::icon_at(ui, pos2(x + 8.0, rect.center().y), m, 15.0, theme::text_dim());
+        x += 26.0;
+    }
+    widgets::text_at(ui, pos2(x, rect.center().y - 9.0), label, font, theme::text(), rect.right() - 32.0 - x);
     if selected {
         widgets::icon_at(ui, pos2(rect.right() - 16.0, rect.center().y), theme::icon::CHECK, 15.0, theme::text());
     }
@@ -3891,9 +4006,13 @@ pub(super) fn setting_row_wide(ui: &mut Ui, title: &str, desc: Option<&str>, con
     let top = rect.center().y - text_h / 2.0;
     // In a right-to-left language, the text starts at the right of its column.
     let x = |g: &egui::Galley| if base.is_some() { rect.left() + text_w - g.size().x } else { rect.left() };
-    ui.painter().galley(pos2(x(&title_g), top), title_g.clone(), theme::with_alpha(theme::text(), fade));
-    if let Some(g) = desc_g {
-        ui.painter().galley(pos2(x(&g), top + title_g.size().y + 3.0), g, theme::with_alpha(theme::text_dim(), fade));
+    let title_pos = pos2(x(&title_g), top);
+    ui.painter().galley(title_pos, title_g.clone(), theme::with_alpha(theme::text(), fade));
+    widgets::tip_if_elided(ui, Rect::from_min_size(title_pos, title_g.size()), &title_g, title);
+    if let (Some(d), Some(g)) = (desc, desc_g) {
+        let desc_pos = pos2(x(&g), top + title_g.size().y + 3.0);
+        ui.painter().galley(desc_pos, g.clone(), theme::with_alpha(theme::text_dim(), fade));
+        widgets::tip_if_elided(ui, Rect::from_min_size(desc_pos, g.size()), &g, d);
     }
     let ctl = Rect::from_min_max(pos2(rect.left() + text_w + 20.0, rect.top()), rect.max);
     let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(ctl).layout(egui::Layout::right_to_left(egui::Align::Center)));

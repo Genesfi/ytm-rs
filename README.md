@@ -10,6 +10,7 @@
     <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-333?style=flat-square" alt="Platforms">
     <a href="LICENSE"><img src="https://img.shields.io/github/license/grapedjuice/ytm-rs?style=flat-square&color=333" alt="License: GPL-3.0"></a>
     <a href="https://ko-fi.com/grapedjuice"><img src="https://img.shields.io/badge/Ko--fi-support-ff4e45?style=flat-square&logo=kofi&logoColor=white" alt="Support on Ko-fi"></a>
+    <a href="https://discord.gg/wj9ycNgHV6"><img src="https://img.shields.io/badge/Discord-join-5865f2?style=flat-square&logo=discord&logoColor=white" alt="Join the Discord"></a>
   </p>
 
   <p>
@@ -18,7 +19,8 @@
     <a href="#features">Features</a> ·
     <a href="#installation">Installation</a> ·
     <a href="#building-from-source">Build from source</a> ·
-    <a href="https://github.com/grapedjuice/ytm-rs/discussions">Discussions</a>
+    <a href="https://github.com/grapedjuice/ytm-rs/discussions">Discussions</a> ·
+    <a href="https://discord.gg/wj9ycNgHV6">Discord</a>
   </p>
 </div>
 
@@ -84,7 +86,7 @@ Most YouTube Music desktop apps are the website running in a hidden browser. ytm
 - **Your language:** the interface comes in 20 languages, and song titles, shelves and charts can follow your language and country.
 - **Touch screens:** swipe to scroll pages and lyrics, and swipe the player bar up to open Now playing.
 - **Mini player:** shrink the window to a small strip with the song and controls (Ctrl+M), or try the experimental pill that sits in a corner and opens on hover.
-- **System-wide media shortcuts:** play/pause, next, previous and volume work while another app is in front or the window is in the tray. Change them in Settings › Keyboard shortcuts.
+- **System-wide media shortcuts:** play/pause, next, previous, volume and Recognize song work while another app is in front or the window is in the tray. Change them in Settings › Keyboard shortcuts.
 - Automatic updates in the background for both the installed and portable versions, with release notes when an update is ready. Pick the Nightly channel for builds of the newest changes.
 
 ## Screenshots
@@ -237,7 +239,7 @@ The relay in `server/` is a separate Cloudflare Worker, also in Rust ([workers-r
 
 ## Contributing
 
-Found a bug or have an idea? [Open an issue](https://github.com/grapedjuice/ytm-rs/issues). Questions, or a setup to show off? Head to [Discussions](https://github.com/grapedjuice/ytm-rs/discussions). Pull requests are welcome, and so are translations: see [Translating ytm-rs](TRANSLATING.md).
+Found a bug or have an idea? [Open an issue](https://github.com/grapedjuice/ytm-rs/issues). Questions, or a setup to show off? Head to [Discussions](https://github.com/grapedjuice/ytm-rs/discussions), or chat with us on [Discord](https://discord.gg/wj9ycNgHV6). Pull requests are welcome: see [Contributing to ytm-rs](CONTRIBUTING.md) for how. So are translations: see [Translating ytm-rs](TRANSLATING.md).
 
 ## License
 
@@ -250,6 +252,7 @@ ytm-rs is licensed under [GPL-3.0](LICENSE).
 - Signed-in stream URLs are decoded with yt-dlp's [EJS](https://github.com/yt-dlp/ejs) solver running in QuickJS.
 - Listen together runs on a small relay built with [workers-rs](https://github.com/cloudflare/workers-rs) on Cloudflare Durable Objects.
 - The animated background is based on Kawarp from [Better Lyrics](https://github.com/better-lyrics), and the theme presets are adapted from the Better Lyrics theme store, with credit to each theme's creators.
+- Recognize song fingerprints audio with code from [SongRec](https://github.com/marin-m/SongRec) (GPL-3.0).
 - Fonts: Inter, DM Sans, Google Sans Flex, Figtree and Instrument Sans (SIL OFL 1.1). Icons: Lucide.
 
 ## Star History
@@ -266,6 +269,26 @@ ytm-rs is licensed under [GPL-3.0](LICENSE).
 
 Thanks to everyone who has sent code, features and fixes to ytm-rs.
 
-<a href="https://github.com/grapedjuice/ytm-rs/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=grapedjuice/ytm-rs" alt="Contributors" />
-</a>
+<p>
+  <a href="https://github.com/grapedjuice"><img src="https://github.com/grapedjuice.png?size=96" width="48" height="48" alt="grapedjuice" title="grapedjuice" /></a>
+  <a href="https://github.com/Sukooo"><img src="https://github.com/Sukooo.png?size=96" width="48" height="48" alt="Sukooo" title="Sukooo" /></a>
+  <a href="https://github.com/Pelotrio"><img src="https://github.com/Pelotrio.png?size=96" width="48" height="48" alt="Pelotrio" title="Pelotrio" /></a>
+  <a href="https://github.com/Ninso112"><img src="https://github.com/Ninso112.png?size=96" width="48" height="48" alt="Ninso112" title="Ninso112" /></a>
+  <a href="https://github.com/vaultboee"><img src="https://github.com/vaultboee.png?size=96" width="48" height="48" alt="vaultboee" title="vaultboee" /></a>
+  <a href="https://github.com/PTKDrake"><img src="https://github.com/PTKDrake.png?size=96" width="48" height="48" alt="PTKDrake" title="PTKDrake" /></a>
+  <a href="https://github.com/jasdeep-dhillon"><img src="https://github.com/jasdeep-dhillon.png?size=96" width="48" height="48" alt="jasdeep-dhillon" title="jasdeep-dhillon" /></a>
+  <a href="https://github.com/eldezaki"><img src="https://github.com/eldezaki.png?size=96" width="48" height="48" alt="eldezaki" title="eldezaki" /></a>
+  <a href="https://github.com/DaJokni"><img src="https://github.com/DaJokni.png?size=96" width="48" height="48" alt="DaJokni" title="DaJokni" /></a>
+  <a href="https://github.com/munitkala"><img src="https://github.com/munitkala.png?size=96" width="48" height="48" alt="munitkala" title="munitkala" /></a>
+  <a href="https://github.com/akrameh"><img src="https://github.com/akrameh.png?size=96" width="48" height="48" alt="akrameh" title="akrameh" /></a>
+  <a href="https://github.com/badwatt"><img src="https://github.com/badwatt.png?size=96" width="48" height="48" alt="badwatt" title="badwatt" /></a>
+  <a href="https://github.com/faruktinaz"><img src="https://github.com/faruktinaz.png?size=96" width="48" height="48" alt="faruktinaz" title="faruktinaz" /></a>
+  <a href="https://github.com/JoaoMarcosSampaio"><img src="https://github.com/JoaoMarcosSampaio.png?size=96" width="48" height="48" alt="JoaoMarcosSampaio" title="JoaoMarcosSampaio" /></a>
+  <a href="https://github.com/LoserDenji"><img src="https://github.com/LoserDenji.png?size=96" width="48" height="48" alt="LoserDenji" title="LoserDenji" /></a>
+  <a href="https://github.com/mkasjanowicz"><img src="https://github.com/mkasjanowicz.png?size=96" width="48" height="48" alt="mkasjanowicz" title="mkasjanowicz" /></a>
+  <a href="https://github.com/vshlapakov"><img src="https://github.com/vshlapakov.png?size=96" width="48" height="48" alt="vshlapakov" title="vshlapakov" /></a>
+  <a href="https://github.com/vipu18"><img src="https://github.com/vipu18.png?size=96" width="48" height="48" alt="vipu18" title="vipu18" /></a>
+  <a href="https://github.com/kevdevrev"><img src="https://github.com/kevdevrev.png?size=96" width="48" height="48" alt="kevdevrev" title="kevdevrev" /></a>
+</p>
+
+See everyone on the [contributors page](https://github.com/grapedjuice/ytm-rs/graphs/contributors).
