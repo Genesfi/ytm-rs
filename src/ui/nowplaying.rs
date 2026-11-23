@@ -2389,6 +2389,28 @@ fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics:
                     };
                     app.actions.push(Action::Copy(text));
                 }
+                let first_artist = track.artists.first().map(|a| a.name.as_str()).unwrap_or_default();
+                if !first_artist.is_empty() {
+                    if app.blocklist.is_user_artist_blocked(first_artist) {
+                        if widgets::menu_action(ui, Some(theme::icon::BAN), &crate::tr!("ui-unblock-artist", name = first_artist)) {
+                            app.actions.push(Action::UnblockArtist(first_artist.to_string()));
+                        }
+                    } else {
+                        if widgets::menu_action(ui, Some(theme::icon::BAN), &crate::tr!("ui-block-artist", name = first_artist)) {
+                            app.actions.push(Action::BlockArtist(first_artist.to_string()));
+                        }
+                    }
+                }
+                let song_blocked = app.blocklist.tracks.iter().any(|tr| tr == &track.id || tr.eq_ignore_ascii_case(&track.title));
+                if song_blocked {
+                    if widgets::menu_action(ui, Some(theme::icon::BAN), crate::tr!("ui-unblock-song")) {
+                        app.actions.push(Action::UnblockSong(track.id.clone()));
+                    }
+                } else {
+                    if widgets::menu_action(ui, Some(theme::icon::BAN), crate::tr!("ui-block-song")) {
+                        app.actions.push(Action::BlockSong(track.clone()));
+                    }
+                }
             });
     });
     open

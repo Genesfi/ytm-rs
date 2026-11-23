@@ -72,6 +72,16 @@ settings-ratings-safe-likes = Anti salah pencet
 settings-ratings-safe-likes-desc = Tahan tombol suka buat menghapus suka.
 settings-ratings-hold-to-remove = Tahan buat hapus suka
 
+## Blocked content & AI
+
+settings-blocked-content = Konten & Artis AI yang Diblokir
+settings-block-soul-over-ai = Blokir artis AI populer (Soul Over AI)
+settings-block-soul-over-ai-desc = Otomatis melewati dan memblokir ~1.370+ artis AI dari database komunitas Soul Over AI
+settings-block-auto-dislike = Otomatis dislike konten yang diblokir
+settings-block-auto-dislike-desc = Mengirim sinyal dislike ke YouTube Music saat melewati artis yang diblokir agar tidak lagi direkomendasikan
+settings-blocked-artists-header = Artis yang diblokir ({ $manual } manual, { $ai } database AI)
+settings-no-blocked-artists = Belum ada artis yang diblokir secara manual. Blokir artis melalui menu konteks lagu untuk menambahkannya di sini.
+
 ## Sound
 
 settings-sound = Suara

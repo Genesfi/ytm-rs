@@ -6,6 +6,7 @@
 mod account;
 mod actions;
 mod bar_swipe;
+mod blocklist;
 mod collections;
 mod colorpick;
 mod comments;
@@ -270,6 +271,10 @@ pub enum Action {
     RemoveDislike(String),
     Share(Target),
     Copy(String),
+    BlockArtist(String),
+    UnblockArtist(String),
+    BlockSong(Track),
+    UnblockSong(String),
     /// Keep a playlist at the top of the sidebar and Library › Playlists (true), or not.
     Pin(String, bool),
     AddToPlaylist(Vec<Track>),
@@ -531,6 +536,7 @@ pub struct App {
     liked: HashSet<String>,
     ratings: ratings::Ratings,
     rating_settings: ratings::Settings,
+    pub blocklist: blocklist::Blocklist,
     selection: Selection,
     find: find::ListFind,
     account_name: Option<String>,
@@ -993,6 +999,7 @@ impl App {
             liked: HashSet::new(),
             ratings: Default::default(),
             rating_settings: ratings::Settings::load(get),
+            blocklist: blocklist::Blocklist::load(get),
             selection: Selection::default(),
             find: Default::default(),
             account_name: None,
@@ -1857,6 +1864,7 @@ impl eframe::App for App {
             self.set_fullscreen(&ctx, false);
         }
         self.rating_settings.share_unlike_settings(&ctx, self.backend.api().epoch());
+        self.blocklist.share_with_ui(&ctx);
         crate::shader::set_glass_on(self.glass_on);
         let now = ctx.input(|i| i.time);
         self.sync_ratings(&ctx, now);
@@ -2228,6 +2236,7 @@ impl eframe::App for App {
         storage.set_string("hide_search_videos", b(self.hide_search_videos));
         storage.set_string("hide_explicit", b(self.hide_explicit));
         self.rating_settings.save(storage);
+        self.blocklist.save(storage);
         storage.set_string("list_sorts", serde_json::to_string(&self.find.sorts).unwrap_or_default());
         storage.set_string("pinned_playlists", serde_json::to_string(&self.pinned).unwrap_or_default());
         storage.set_string("podcasts", b(self.show_podcasts));

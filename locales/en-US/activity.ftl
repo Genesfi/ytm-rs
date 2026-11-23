@@ -2,6 +2,11 @@
 
 status-link-copied = Link copied
 status-copied = Copied to clipboard
+status-artist-blocked = Artist blocked: { $name }
+status-artist-unblocked = Artist unblocked: { $name }
+status-song-blocked = Song blocked: { $title }
+status-song-unblocked = Song unblocked: { $title }
+status-blocked-skipped = Skipped blocked: { $name }
 status-starting-playback = Starting playback…
 status-playing-next = Playing next
 status-added-queue = Added to queue

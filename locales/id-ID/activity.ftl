@@ -2,6 +2,11 @@
 
 status-link-copied = Tautan disalin
 status-copied = Disalin ke papan klip
+status-artist-blocked = Artis diblokir: { $name }
+status-artist-unblocked = Blokir artis dibuka: { $name }
+status-song-blocked = Lagu diblokir: { $title }
+status-song-unblocked = Blokir lagu dibuka: { $title }
+status-blocked-skipped = Melewati yang diblokir: { $name }
 status-starting-playback = Memulai pemutaran…
 status-playing-next = Diputar berikutnya
 status-added-queue = Ditambahkan ke antrian

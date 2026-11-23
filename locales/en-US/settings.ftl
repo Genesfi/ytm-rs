@@ -72,6 +72,16 @@ settings-ratings-safe-likes = Safe liked songs
 settings-ratings-safe-likes-desc = Hold the like button to remove a like.
 settings-ratings-hold-to-remove = Hold to remove like
 
+## Blocked content & AI
+
+settings-blocked-content = Blocked content & AI
+settings-block-soul-over-ai = Block known AI artists (Soul Over AI)
+settings-block-soul-over-ai-desc = Automatically skips and blocks ~1,370+ known AI-generated artists from the Soul Over AI community database
+settings-block-auto-dislike = Auto-dislike blocked content
+settings-block-auto-dislike-desc = Sends a dislike to YouTube Music when skipping blocked artists so YouTube stops recommending them
+settings-blocked-artists-header = Blocked artists ({ $manual } custom, { $ai } AI database)
+settings-no-blocked-artists = No artists manually blocked yet. Block an artist from the song context menu to add them here.
+
 ## Sound
 
 settings-sound = Sound

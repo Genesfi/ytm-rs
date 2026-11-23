@@ -337,6 +337,17 @@ pub fn icon_at(ui: &Ui, center: Pos2, glyph: char, size: f32, color: Color32) {
         }
         return;
     }
+    if glyph == icon::BAN {
+        // Lucide ban icon: circle with diagonal line on a 24-unit grid.
+        let unit = size / 24.0;
+        let stroke = egui::Stroke::new((2.0 * unit).max(1.5), color);
+        let p = ui.painter();
+        let r = 8.5 * unit;
+        p.circle_stroke(center, r, stroke);
+        let offset = r * std::f32::consts::FRAC_1_SQRT_2;
+        p.line_segment([center - vec2(offset, offset), center + vec2(offset, offset)], stroke);
+        return;
+    }
     // A theme's own icon for it. Most have none.
     if !crate::preset::active().app.icons.is_empty() && super::vector::name_of(glyph).is_some_and(|name| super::vector::paint(ui, name, center, size * 1.1, color)) {
         return;
@@ -1168,6 +1179,28 @@ pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, 
             format!("{} - {}", t.title, t.artist_line())
         };
         acts.push(Action::Copy(text));
+    }
+    let first_artist = t.artists.first().map(|a| a.name.as_str()).unwrap_or_default();
+    if !first_artist.is_empty() {
+        if super::blocklist::is_user_artist_blocked_ui(ui.ctx(), first_artist) {
+            if menu_action(ui, Some(icon::BAN), &crate::tr!("ui-unblock-artist", name = first_artist)) {
+                acts.push(Action::UnblockArtist(first_artist.to_string()));
+            }
+        } else {
+            if menu_action(ui, Some(icon::BAN), &crate::tr!("ui-block-artist", name = first_artist)) {
+                acts.push(Action::BlockArtist(first_artist.to_string()));
+            }
+        }
+    }
+    let song_blocked = super::blocklist::active_blocklist(ui.ctx()).is_some_and(|b| b.tracks.iter().any(|tr| tr == &t.id || tr.eq_ignore_ascii_case(&t.title)));
+    if song_blocked {
+        if menu_action(ui, Some(icon::BAN), crate::tr!("ui-unblock-song")) {
+            acts.push(Action::UnblockSong(t.id.clone()));
+        }
+    } else {
+        if menu_action(ui, Some(icon::BAN), crate::tr!("ui-block-song")) {
+            acts.push(Action::BlockSong(t.clone()));
+        }
     }
     match crate::downloads::path(&t.id) {
         Some(path) => {

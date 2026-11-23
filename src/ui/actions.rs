@@ -264,6 +264,36 @@ impl App {
                 self.share_pending = Some(text);
                 self.toast(crate::tr!("status-copied"));
             }
+            Action::BlockArtist(name) => {
+                if self.blocklist.block_artist(&name) {
+                    self.toast(crate::tr!("status-artist-blocked", name = name.as_str()));
+                    self.drop_blocked_from_queue();
+                    if let Some(t) = self.current().cloned() && self.blocklist.is_artist_blocked(&name) {
+                        if let Some(reason) = self.blocklist.is_blocked(&t) {
+                            self.skip_blocked(&t, &reason);
+                        }
+                    }
+                }
+            }
+            Action::UnblockArtist(name) => {
+                if self.blocklist.unblock_artist(&name) {
+                    self.toast(crate::tr!("status-artist-unblocked", name = name.as_str()));
+                }
+            }
+            Action::BlockSong(track) => {
+                if self.blocklist.block_song(&track) {
+                    self.toast(crate::tr!("status-song-blocked", title = track.title.as_str()));
+                    self.drop_blocked_from_queue();
+                    if self.current_id() == Some(&track.id) {
+                        self.skip_blocked(&track, &super::blocklist::BlockedReason::Song(track.title.clone()));
+                    }
+                }
+            }
+            Action::UnblockSong(id_or_title) => {
+                if self.blocklist.unblock_song(&id_or_title) {
+                    self.toast(crate::tr!("status-song-unblocked", title = id_or_title.as_str()));
+                }
+            }
             Action::Pin(id, on) => {
                 self.pinned.retain(|p| *p != id);
                 if on {

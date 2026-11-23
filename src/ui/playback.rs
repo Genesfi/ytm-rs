@@ -382,6 +382,10 @@ impl App {
     fn start_current(&mut self, at: Duration, report: bool, swap: bool) {
         let swap = std::mem::take(&mut self.resume_as_song) || swap;
         let Some(track) = self.current().cloned() else { return };
+        if let Some(reason) = self.blocklist.is_blocked(&track) {
+            self.skip_blocked(&track, &reason);
+            return;
+        }
         // Picking up mid-song (a resume, a download that broke off): the position is the
         // song version's when one was playing, so that goes on; a music video stays one.
         // Likewise a song's music video. When the user picked Video mode, automatically
@@ -642,6 +646,36 @@ impl App {
             self.ended = true;
             self.top_up();
         }
+    }
+
+    pub(super) fn skip_blocked(&mut self, track: &Track, reason: &super::blocklist::BlockedReason) {
+        if self.blocklist.auto_dislike {
+            self.backend.request(Req::Dislike { video_id: track.id.clone(), skip_generation: None });
+        }
+        let desc = match reason {
+            super::blocklist::BlockedReason::Artist(name) => name.clone(),
+            super::blocklist::BlockedReason::SoulOverAi(name) => format!("{name} (AI)"),
+            super::blocklist::BlockedReason::Song(title) => title.clone(),
+            super::blocklist::BlockedReason::Keyword(kw) => kw.clone(),
+        };
+        self.toast(crate::tr!("status-blocked-skipped", name = desc.as_str()));
+        self.skip_disliked();
+    }
+
+    pub(super) fn drop_blocked_from_queue(&mut self) {
+        let blocklist = &self.blocklist;
+        let mut i = 0;
+        let (cur, mut index) = (self.queue.index, self.queue.index);
+        self.queue.tracks.retain(|t| {
+            let is_current = Some(i) == cur;
+            let keep = is_current || blocklist.is_blocked(t).is_none();
+            if !keep && cur.is_some_and(|c| i < c) {
+                index = index.map(|c| c - 1);
+            }
+            i += 1;
+            keep
+        });
+        self.queue.index = index;
     }
 
     pub(super) fn prev(&mut self) {
