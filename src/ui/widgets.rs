@@ -1908,8 +1908,6 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     // A finger on the cards: the shelf's own drag would take an up-and-down swipe too
     // and the page wouldn't move, so the drag is handled here instead, locked to the
     // way it starts (the shelf sideways, the page up and down).
-    // Use ui.cursor().min so the interaction rect is always positioned accurately
-    // in the current frame, even after the parent page has scrolled vertically.
     let height_id = sid.with("h_height");
     let height = ui.ctx().data(|d| d.get_temp::<f32>(height_id)).unwrap_or(item_width + 58.0);
     let rect = Rect::from_min_size(ui.cursor().min, vec2(viewport, height));
@@ -1954,7 +1952,9 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     }).inner);
     ui.ctx().data_mut(|d| {
         d.insert_temp(viewport_id, out.inner_rect.width());
-        d.insert_temp(height_id, out.inner_rect.height());
+        if out.content_size.y > 0.0 {
+            d.insert_temp(height_id, out.content_size.y);
+        }
     });
     (out.inner, reached_end)
 }
@@ -1976,6 +1976,30 @@ fn axis_locked_drag(ui: &Ui, resp: &Response, state_id: egui::Id) -> Option<Drag
     const LOCK: f32 = 6.0;
     /// How much of the speed at letting go it coasts on: points per point/second.
     const COAST: f32 = 0.3;
+
+    // For mouse drag (desktop): mouse left-click on a horizontal carousel is ALWAYS an intentional
+    // horizontal drag. Desktop users never expect left-click dragging on a carousel to scroll the
+    // page vertically (which is done via mouse wheel).
+    // Locking to vertical on slight diagonal mouse movement caused shelves to randomly freeze ("kadang bisa kadang tidak").
+    let is_touch = ui.input(|i| i.any_touches());
+    if !is_touch {
+        let mut action = None;
+        if resp.dragged() {
+            let delta = ui.input(|i| i.pointer.delta());
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            if delta.x != 0.0 {
+                action = Some(DragAction::Step(delta.x));
+            }
+        }
+        if resp.drag_stopped() {
+            let speed = (ui.input(|i| i.pointer.velocity().x) * COAST).clamp(-2000.0, 2000.0);
+            if speed.abs() > 1.0 {
+                action = Some(DragAction::Coast(speed));
+            }
+        }
+        return action;
+    }
+
     let (mut moved, mut axis): (Vec2, Option<usize>) = ui.ctx().data(|d| d.get_temp(state_id)).unwrap_or((Vec2::ZERO, None));
     if resp.drag_started() {
         (moved, axis) = (Vec2::ZERO, None);
@@ -2299,10 +2323,32 @@ mod shelf_touch_tests {
             self.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }, touch(TouchPhase::End, at), Event::PointerGone]);
             moved
         }
+
+        fn drag_mouse(&mut self, from: Pos2, by: egui::Vec2) -> egui::Vec2 {
+            let start = self.card.min;
+            let press = |down| Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: down, modifiers: Modifiers::NONE };
+            self.frame(vec![Event::PointerMoved(from), press(true)]);
+            let mut at = from;
+            for _ in 0..10 {
+                at += by / 10.0;
+                self.frame(vec![Event::PointerMoved(at)]);
+            }
+            let moved = self.card.min - start;
+            self.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }, Event::PointerGone]);
+            moved
+        }
     }
 
     fn touch(phase: TouchPhase, pos: Pos2) -> Event {
         Event::Touch { device_id: TouchDeviceId(1), id: TouchId(1), phase, pos, force: None }
+    }
+
+    #[test]
+    fn mouse_drag_on_cards_scrolls_the_shelf() {
+        let mut p = Page::new();
+        // Mouse drag with diagonal wobble (e.g. moving mouse sideways while slightly jittering vertically)
+        let moved = p.drag_mouse(pos2(400.0, 200.0), vec2(-150.0, 10.0));
+        assert!(moved.x < -100.0, "mouse drag didn't scroll shelf: {moved:?}");
     }
 
     #[test]
