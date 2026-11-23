@@ -2473,15 +2473,38 @@ fn lyric_options(app: &mut App, ui: &mut Ui) {
     ui.painter().text(pos2(row.left() + 12.0, row.center().y), egui::Align2::LEFT_CENTER, crate::tr!("player-timing"), theme::regular(14.0), theme::text());
     let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(row.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
     sub.spacing_mut().item_spacing.x = 2.0;
-    if mini_icon(&mut sub, icon::CHEVRON_RIGHT, crate::tr!("player-lyrics-later"), true).clicked() {
-        app.lyric_prefs.set_song_offset(&id, shown, off + 0.1);
+
+    let step = if sub.input(|i| i.modifiers.shift) {
+        1.0
+    } else if sub.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+        5.0
+    } else {
+        0.1
+    };
+
+    if mini_icon(&mut sub, icon::CHEVRON_RIGHT, &format!("{}: +{step:.1}s", crate::tr!("player-lyrics-later")), true).clicked() {
+        app.lyric_prefs.set_song_offset(&id, shown, off + step);
     }
-    let label = format!("{off:+.1}s").replace("+0.0", "0.0");
-    if mini_text(&mut sub, &label, false, crate::tr!("player-timing-reset")).double_clicked() {
-        app.lyric_prefs.set_song_offset(&id, shown, 0.0);
+    let mut val = off as f64;
+    let dv = egui::DragValue::new(&mut val)
+        .speed(0.1)
+        .range(-300.0..=300.0)
+        .custom_formatter(|n, _| if n.abs() < 0.05 { "0.0s".to_owned() } else { format!("{n:+.1}s") })
+        .custom_parser(|s| {
+            let clean = s.trim().trim_end_matches('s').trim();
+            clean.parse::<f64>().ok()
+        });
+    let dv_resp = sub.add(dv).on_hover_text("Drag or click to type offset (e.g. 10.0 or -3.5)");
+    if dv_resp.changed() {
+        app.lyric_prefs.set_song_offset(&id, shown, val as f32);
     }
-    if mini_icon(&mut sub, icon::CHEVRON_LEFT, crate::tr!("player-lyrics-earlier"), true).clicked() {
-        app.lyric_prefs.set_song_offset(&id, shown, off - 0.1);
+    if mini_icon(&mut sub, icon::CHEVRON_LEFT, &format!("{}: -{step:.1}s", crate::tr!("player-lyrics-earlier")), true).clicked() {
+        app.lyric_prefs.set_song_offset(&id, shown, off - step);
+    }
+    if off.abs() > 0.05 {
+        if mini_text(&mut sub, "0s", false, crate::tr!("player-timing-reset")).clicked() {
+            app.lyric_prefs.set_song_offset(&id, shown, 0.0);
+        }
     }
     if let Some(p) = pick.filter(|p| *p != shown) {
         app.lyric_prefs.pick(&id, set, p);
