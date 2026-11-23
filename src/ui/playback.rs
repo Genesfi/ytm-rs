@@ -712,6 +712,7 @@ impl App {
         self.refresh_lyrics(shown);
         self.top_up();
         self.prefetch_next();
+        self.stats_start();
     }
 
     /// `t` is explicit while those are hidden: it won't play, and the toast says why.
