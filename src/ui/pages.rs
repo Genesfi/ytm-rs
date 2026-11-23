@@ -2128,49 +2128,52 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
         divider(ui);
         let manual = blocklist.artists.len();
         let ai = if blocklist.soul_over_ai { blocklist.soul_artist_count() } else { 0 };
-        ui.add_space(4.0);
-        let mut clear_all = false;
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(tr!("settings-blocked-artists-header", manual = manual, ai = ai)).font(theme::semibold(13.0)).color(theme::text()));
-            if !blocklist.artists.is_empty() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(tr!("settings-clear")).clicked() {
-                        clear_all = true;
-                    }
-                });
-            }
-        });
-        ui.add_space(6.0);
-        if clear_all {
-            blocklist.clear_artists();
-            app.invalidate_played_lately();
-        } else if blocklist.artists.is_empty() {
-            ui.label(egui::RichText::new(tr!("settings-no-blocked-artists")).font(theme::regular(13.0)).color(theme::text_dim()));
-        } else {
-            let mut unblock_name = None;
-            egui::ScrollArea::vertical()
-                .id_salt("blocked_artists_scroll")
-                .max_height(85.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                        for artist in &blocklist.artists {
-                            if widgets::pill(ui, artist, Some(icon::X), false)
-                                .on_hover_text(tr!("ui-unblock-artist", name = artist.as_str()))
-                                .clicked()
-                            {
-                                unblock_name = Some(artist.clone());
-                            }
+        let artists_filter_text = format!("{} {}", tr!("settings-blocked-artists-header", manual = manual, ai = ai), blocklist.artists.join(" "));
+        if filter_show(ui, &artists_filter_text) {
+            ui.add_space(4.0);
+            let mut clear_all = false;
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tr!("settings-blocked-artists-header", manual = manual, ai = ai)).font(theme::semibold(13.0)).color(theme::text()));
+                if !blocklist.artists.is_empty() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button(tr!("settings-clear")).clicked() {
+                            clear_all = true;
                         }
                     });
-                });
-            if let Some(name) = unblock_name {
-                blocklist.unblock_artist(&name);
+                }
+            });
+            ui.add_space(6.0);
+            if clear_all {
+                blocklist.clear_artists();
                 app.invalidate_played_lately();
+            } else if blocklist.artists.is_empty() {
+                ui.label(egui::RichText::new(tr!("settings-no-blocked-artists")).font(theme::regular(13.0)).color(theme::text_dim()));
+            } else {
+                let mut unblock_name = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("blocked_artists_scroll")
+                    .max_height(85.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for artist in &blocklist.artists {
+                                if widgets::pill(ui, artist, Some(icon::X), false)
+                                    .on_hover_text(tr!("ui-unblock-artist", name = artist.as_str()))
+                                    .clicked()
+                                {
+                                    unblock_name = Some(artist.clone());
+                                }
+                            }
+                        });
+                    });
+                if let Some(name) = unblock_name {
+                    blocklist.unblock_artist(&name);
+                    app.invalidate_played_lately();
+                }
             }
+            ui.add_space(4.0);
         }
-        ui.add_space(4.0);
     });
     settings_section(ui, tr!("settings-sound"), None, None, |ui| {
         let desc = normalization_desc(app);
