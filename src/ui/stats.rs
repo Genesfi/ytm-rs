@@ -162,8 +162,8 @@ pub(super) struct StatsState {
     /// Path of the most recently saved Wrapped card PNG (for "Open folder" / "Open image").
     last_saved: Arc<Mutex<Option<PathBuf>>>,
     /// When set, paints the Wrapped card on a top overlay until the screenshot callback finishes
-    /// so it can be captured cleanly from any scroll position.
-    capture_overlay: Option<(String, bool)>,
+    /// so it can be captured cleanly from any scroll position (`stage`: 0 = paint first, 1 = request screenshot, 2 = wait for callback).
+    capture_overlay: Option<(String, u8)>,
     capture_done: Arc<std::sync::atomic::AtomicBool>,
     /// Last drawn screen rect of the Wrapped card, for cropping the screenshot.
     card_rect: Option<Rect>,
@@ -580,7 +580,7 @@ impl App {
         // Card is scrolled partially off-screen or behind chrome: paint it cleanly on an overlay
         // until the screenshot callback completes.
         self.stats.capture_done.store(false, Ordering::Relaxed);
-        self.stats.capture_overlay = Some((period_label.to_owned(), false));
+        self.stats.capture_overlay = Some((period_label.to_owned(), 0));
         *self.stats.save_note.lock().unwrap() = Some("Saving…".into());
         ctx.request_repaint();
     }
@@ -1750,24 +1750,25 @@ fn wrapped_section(app: &mut App, ui: &mut Ui, s: &Summary) {
     if app.stats.capture_done.load(Ordering::Relaxed) {
         app.stats.capture_overlay = None;
     }
-    if let Some((label, requested)) = app.stats.capture_overlay.clone() {
+    if let Some((label, stage)) = app.stats.capture_overlay.clone() {
         let screen = ui.ctx().content_rect();
         let origin = pos2(
             (screen.center().x - CARD_W * 0.5).clamp(screen.left(), (screen.right() - CARD_W).max(screen.left())),
             (screen.center().y - CARD_H * 0.5).clamp(screen.top(), (screen.bottom() - CARD_H).max(screen.top())),
         );
         let overlay_rect = Rect::from_min_size(origin, vec2(CARD_W, CARD_H));
-        egui::Area::new(egui::Id::unique("wrapped-capture-overlay"))
-            .order(egui::Order::Tooltip)
-            .fixed_pos(origin)
-            .interactable(false)
-            .show(ui.ctx(), |ui| {
-                let (rect, _) = ui.allocate_exact_size(vec2(CARD_W, CARD_H), Sense::hover());
-                draw_wrapped_card(ui, rect, style, &data);
-            });
-        if !requested {
-            app.stats.capture_overlay = Some((label.clone(), true));
-            app.capture_wrapped_rect(ui.ctx(), overlay_rect, &label);
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("wrapped-capture-overlay"));
+        ui.scope_builder(egui::UiBuilder::new().layer_id(layer).max_rect(screen), |ui| {
+            ui.painter().rect_filled(overlay_rect, 0.0, Color32::from_rgb(16, 16, 20));
+            draw_wrapped_card(ui, overlay_rect, style, &data);
+        });
+        match stage {
+            0 => app.stats.capture_overlay = Some((label, 1)),
+            1 => {
+                app.stats.capture_overlay = Some((label.clone(), 2));
+                app.capture_wrapped_rect(ui.ctx(), overlay_rect, &label);
+            }
+            _ => {}
         }
         ui.ctx().request_repaint();
     }
