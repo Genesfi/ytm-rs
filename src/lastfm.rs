@@ -224,6 +224,135 @@ async fn call(http: &reqwest::Client, method: &str, params: &[(&str, &str)], sk:
     Ok(v)
 }
 
+/// Fetch up to 2 normalized genre tags for an artist using Last.fm's public `artist.getTopTags`.
+pub async fn artist_tags(http: &reqwest::Client, artist: &str) -> anyhow::Result<Vec<String>> {
+    let v = call(http, "artist.getTopTags", &[("artist", artist), ("autocorrect", "1")], None, false).await?;
+    let Some(arr) = v["toptags"]["tag"].as_array() else {
+        return Ok(Vec::new());
+    };
+    let artist_low = artist.trim().to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for item in arr {
+        let count = item["count"].as_u64().unwrap_or(0);
+        if count < 10 {
+            continue;
+        }
+        let Some(raw) = item["name"].as_str() else { continue };
+        let Some(norm) = normalize_genre(raw, &artist_low) else { continue };
+        if !out.iter().any(|g| g.eq_ignore_ascii_case(&norm)) {
+            out.push(norm);
+            if out.len() >= 2 {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn normalize_genre(raw: &str, artist_low: &str) -> Option<String> {
+    let clean = raw.trim();
+    if clean.is_empty() || clean.len() > 32 {
+        return None;
+    }
+    let low = clean.to_lowercase();
+    if low == artist_low || low.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    const SKIP: &[&str] = &[
+        "seen live",
+        "female vocalists",
+        "female vocalist",
+        "male vocalists",
+        "male vocalist",
+        "japanese",
+        "japan",
+        "chinese",
+        "china",
+        "korean",
+        "korea",
+        "indonesia",
+        "indonesian",
+        "american",
+        "british",
+        "english",
+        "german",
+        "french",
+        "underground",
+        "under 2000 listeners",
+        "favorite",
+        "favourites",
+        "favorites",
+        "amazing",
+        "awesome",
+        "beautiful",
+        "chill",
+        "spotify",
+        "all",
+        "music",
+        "kamitsubaki",
+        "honkai impact",
+        "genshin impact",
+    ];
+    if SKIP.contains(&low.as_str()) {
+        return None;
+    }
+    let mapped = match low.as_str() {
+        "j-pop" | "jpop" => "J-Pop",
+        "j-rock" | "jrock" => "J-Rock",
+        "k-pop" | "kpop" => "K-Pop",
+        "c-pop" | "cpop" => "C-Pop",
+        "indo pop" | "indonesian pop" => "Indo Pop",
+        "indonesian indie" | "indo indie" => "Indonesian Indie",
+        "video game music" | "vgm" | "video game" => "Video Game Music",
+        "soundtrack" | "ost" | "game soundtrack" | "anime soundtrack" => "Soundtrack",
+        "anime" | "anisong" => "Anime",
+        "vocaloid" | "utaite" => return Some(if low == "vocaloid" { "Vocaloid" } else { "Utaite" }.to_owned()),
+        "rnb" | "r&b" | "rhythm and blues" => "R&B",
+        "hip-hop" | "hip hop" | "rap" => "Hip-Hop",
+        "lo-fi" | "lofi" => "Lo-Fi",
+        "edm" => "EDM",
+        "indie pop" => "Indie Pop",
+        "indie rock" => "Indie Rock",
+        "singer-songwriter" => "Singer-Songwriter",
+        "city pop" => "City Pop",
+        "electropop" => "Electropop",
+        "synthpop" => "Synthpop",
+        "electronic" | "electronica" | "atmospheric electronic" => "Electronic",
+        "alternative" | "alt-rock" | "alternative rock" => "Alternative",
+        "pop" => "Pop",
+        "indie" => "Indie",
+        "rock" => "Rock",
+        "classical" => "Classical",
+        "jazz" => "Jazz",
+        "folk" => "Folk",
+        "ballad" => "Ballad",
+        "metal" => "Metal",
+        "acoustic" => "Acoustic",
+        "ambient" => "Ambient",
+        "punk" => "Punk",
+        "soul" => "Soul",
+        "blues" => "Blues",
+        _ => {
+            // Title-case unknown genre tag.
+            let mut title = String::with_capacity(clean.len());
+            for (i, w) in clean.split_whitespace().enumerate() {
+                if i > 0 {
+                    title.push(' ');
+                }
+                let mut ch = w.chars();
+                if let Some(first) = ch.next() {
+                    for c in first.to_uppercase() {
+                        title.push(c);
+                    }
+                    title.push_str(&ch.as_str().to_lowercase());
+                }
+            }
+            return Some(title);
+        }
+    };
+    Some(mapped.to_owned())
+}
+
 fn open_browser(url: &str) {
     #[cfg(windows)]
     unsafe {
@@ -249,5 +378,14 @@ mod tests {
         h.update(format!("api_key{API_KEY}methodauth.getToken{SECRET}"));
         let want = format!("{:x}", h.finalize());
         assert_eq!(sig, want);
+    }
+
+    #[test]
+    fn normalizes_and_filters_genre_tags() {
+        assert_eq!(normalize_genre("seen live", "hoyo-mix"), None);
+        assert_eq!(normalize_genre("japanese", "rokudenashi"), None);
+        assert_eq!(normalize_genre("jpop", "rokudenashi").as_deref(), Some("J-Pop"));
+        assert_eq!(normalize_genre("video game music", "hoyo-mix").as_deref(), Some("Video Game Music"));
+        assert_eq!(normalize_genre("rnb", "ghea indrawari").as_deref(), Some("R&B"));
     }
 }

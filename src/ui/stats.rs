@@ -175,6 +175,9 @@ pub(super) struct StatsState {
     last_sync_check: Option<Instant>,
     cache: Option<Cached>,
     played_lately: Option<PlayedLatelyCache>,
+    pub(super) artist_genres: std::collections::HashMap<String, Vec<String>>,
+    genres_asked: std::collections::HashSet<String>,
+    genres_loaded: bool,
 }
 
 impl StatsState {
@@ -203,6 +206,9 @@ impl StatsState {
             last_sync_check: None,
             cache: None,
             played_lately: None,
+            artist_genres: std::collections::HashMap::new(),
+            genres_asked: std::collections::HashSet::new(),
+            genres_loaded: false,
         }
     }
 }
@@ -343,6 +349,15 @@ impl App {
     /// kick off a background load if so.
     pub(super) fn stats_sync_check(&mut self, force: bool) {
         self.stats.last_sync_check = Some(Instant::now());
+        if !self.stats.genres_loaded {
+            self.stats.genres_loaded = true;
+            let path = self.backend.data_dir().join("artist_genres.json");
+            if let Ok(bytes) = std::fs::read(&path)
+                && let Ok(map) = serde_json::from_slice::<std::collections::HashMap<String, Vec<String>>>(&bytes)
+            {
+                self.stats.artist_genres = map;
+            }
+        }
         if self.stats.loading {
             return;
         }
@@ -461,6 +476,13 @@ impl App {
         let cards = Rc::new(cards);
         self.stats.played_lately = Some(PlayedLatelyCache { key, cards: cards.clone() });
         cards
+    }
+
+    pub(super) fn stats_save_genres(&self) {
+        let path = self.backend.data_dir().join("artist_genres.json");
+        if let Ok(json) = serde_json::to_vec(&self.stats.artist_genres) {
+            let _ = std::fs::write(path, json);
+        }
     }
 
     fn stats_summary(&mut self) -> (Rc<Summary>, Option<u64>, i64) {
@@ -700,6 +722,8 @@ pub fn page(app: &mut App, ui: &mut Ui) {
 
                 ui.add_space(28.0);
                 top_lists(app, ui, &summary);
+
+                top_genres_section(app, ui, &summary);
 
                 ui.add_space(28.0);
                 when_you_listen(ui, &summary, app.accent_color());
@@ -1089,6 +1113,80 @@ fn top_lists(app: &mut App, ui: &mut Ui, s: &Summary) {
         ui.add_space(24.0);
         top_artists_col(app, ui, s);
     }
+}
+
+fn top_genres_section(app: &mut App, ui: &mut Ui, s: &Summary) {
+    // Queue background Last.fm tag lookups for any uncached top artists in this period.
+    let missing: Vec<String> = s
+        .artist_seconds
+        .iter()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            let key = name.to_lowercase();
+            !app.stats.artist_genres.contains_key(&key) && !app.stats.genres_asked.contains(&key)
+        })
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        for name in &missing {
+            app.stats.genres_asked.insert(name.to_lowercase());
+        }
+        app.backend.request(crate::backend::Req::ArtistGenres(missing));
+    }
+
+    let mut weights: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut total_w = 0u64;
+    for (name, secs) in &s.artist_seconds {
+        if *secs == 0 {
+            continue;
+        }
+        let Some(tags) = app.stats.artist_genres.get(&name.to_lowercase()) else { continue };
+        for (i, tag) in tags.iter().enumerate() {
+            let w = if i == 0 { secs * 2 } else { *secs };
+            *weights.entry(tag.clone()).or_default() += w;
+            total_w += w;
+        }
+    }
+    if total_w == 0 || weights.is_empty() {
+        return;
+    }
+
+    let mut ranked: Vec<(String, u64)> = weights.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let top: Vec<(String, u32)> = ranked
+        .into_iter()
+        .take(5)
+        .map(|(g, w)| (g, ((w * 100 + total_w / 2) / total_w).max(1) as u32))
+        .collect();
+
+    ui.add_space(28.0);
+    section_heading(ui, "Top genres", "Estimated from your most-heard artists.", None);
+    ui.add_space(12.0);
+
+    const PALETTE: [Color32; 5] = [
+        Color32::from_rgb(0xFF, 0x6D, 0x2E),
+        Color32::from_rgb(0xD9, 0xD9, 0xE0),
+        Color32::from_rgb(0xAE, 0x4D, 0xFF),
+        Color32::from_rgb(0xEA, 0xFF, 0x56),
+        Color32::from_rgb(0x43, 0xC6, 0xFF),
+    ];
+    let ink = Color32::from_rgb(0x14, 0x14, 0x18);
+    let n = top.len() as f32;
+    let gap = 10.0;
+    let w = ui.available_width();
+    let tile_w = ((w - gap * (n - 1.0)) / n).max(110.0);
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(gap, gap);
+        for (i, (genre, pct)) in top.iter().enumerate() {
+            let bg = PALETTE[i % PALETTE.len()];
+            let (r, _) = ui.allocate_exact_size(vec2(tile_w, 92.0), Sense::hover());
+            ui.painter().rect_filled(r, 12.0, bg);
+            ui.painter().text(pos2(r.left() + 14.0, r.top() + 14.0), Align2::LEFT_TOP, format!("{pct}%"), theme::bold(26.0), ink);
+            let name_g = widgets::galley(ui, genre, theme::semibold(13.5), ink, r.width() - 28.0);
+            ui.painter().galley(pos2(r.left() + 14.0, r.bottom() - 14.0 - name_g.size().y), name_g, ink);
+        }
+    });
 }
 
 fn section_heading(ui: &mut Ui, title: &str, hint: &str, toggle: Option<(&str, Color32)>) -> bool {

@@ -367,6 +367,12 @@ impl App {
                 }
                 self.artist_pics.insert(id, pic);
             }
+            Resp::ArtistGenres(items) => {
+                for (name, tags) in items {
+                    self.stats.artist_genres.insert(name.to_lowercase(), tags);
+                }
+                self.stats_save_genres();
+            }
             Resp::Segments { video_id, segments } => {
                 if self.playing_id() == Some(video_id.as_str()) {
                     log::info!("sponsorblock: {} segment(s) for {video_id}", segments.len());

@@ -78,6 +78,7 @@ pub enum Req {
     Segments { video_id: String },
     /// An artist's picture, for the badge on Discord's card: `id`'s, looked up by `name`.
     ArtistPicture { id: String, name: String },
+    ArtistGenres(Vec<String>),
     /// Romanization and translation for the lyric lines of one source.
     LyricsExtras { video_id: String, source: String, lines: Vec<String>, lang: Option<String>, target: String },
     /// Process cover art for the background; `key` is echoed back. `None`: the song has
@@ -170,7 +171,7 @@ impl Req {
             Req::Download { .. } | Req::DownloadMany { .. } => crate::tr!("settings-download"),
             Req::Lyrics(_) => crate::tr!("settings-lyrics"),
             Req::Segments { .. } => "SponsorBlock",
-            Req::ArtistPicture { .. } => crate::tr!("discord-artist-photo"),
+            Req::ArtistPicture { .. } | Req::ArtistGenres(_) => crate::tr!("discord-artist-photo"),
             Req::LyricsExtras { .. } => crate::tr!("settings-translation"),
             Req::Art { .. } => crate::tr!("discord-album-art"),
             Req::Radio { .. } => crate::tr!("ui-radio"),
@@ -203,7 +204,7 @@ impl Req {
 
     /// Background requests fail quietly (logged, no toast).
     fn quiet(&self) -> bool {
-        matches!(self, Req::Suggest { .. } | Req::Account | Req::Channels | Req::ServerQueue | Req::SongRating { .. } | Req::Art { .. } | Req::Radio { smart: true, .. } | Req::Prefetch { .. } | Req::StageNext { .. } | Req::GaplessStarted { .. } | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::ArtistPicture { .. } | Req::MusicVideo(_) | Req::LyricsExtras { .. } | Req::Comments { .. } | Req::CommentsPage { .. } | Req::CommentAction { .. } | Req::Reachable)
+        matches!(self, Req::Suggest { .. } | Req::Account | Req::Channels | Req::ServerQueue | Req::SongRating { .. } | Req::Art { .. } | Req::Radio { smart: true, .. } | Req::Prefetch { .. } | Req::StageNext { .. } | Req::GaplessStarted { .. } | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::ArtistPicture { .. } | Req::ArtistGenres(_) | Req::MusicVideo(_) | Req::LyricsExtras { .. } | Req::Comments { .. } | Req::CommentsPage { .. } | Req::CommentAction { .. } | Req::Reachable)
     }
 }
 
@@ -426,6 +427,7 @@ pub enum Resp {
     Segments { video_id: String, segments: Vec<crate::sponsorblock::Segment> },
     /// `None`: none was found.
     ArtistPicture { id: String, pic: Option<crate::discord::Badge> },
+    ArtistGenres(Vec<(String, Vec<String>)>),
     /// Romanization/translation for one source's lines, arriving after them.
     LyricsExtras { video_id: String, source: String, target: String, extras: crate::translate::Extras },
     /// `None`: there's no cover to take colours from (the song has none, or it couldn't
@@ -1249,6 +1251,14 @@ impl Backend {
                 Req::ArtistPicture { id, name } => {
                     let found = ytm::search_cards(api, &name, ytm::Filter::Artists, false).await?;
                     Resp::ArtistPicture { pic: artist_pic(&found, &id, &name), id }
+                }
+                Req::ArtistGenres(names) => {
+                    let mut out = Vec::with_capacity(names.len());
+                    for name in names {
+                        let tags = crate::lastfm::artist_tags(&self.http(), &name).await.unwrap_or_default();
+                        out.push((name, tags));
+                    }
+                    Resp::ArtistGenres(out)
                 }
                 Req::LyricsExtras { video_id, source, lines, lang, target } => {
                     let key = format!("{video_id}_{source}");

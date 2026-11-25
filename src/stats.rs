@@ -770,6 +770,8 @@ pub struct Summary {
     /// Most plays first; ties go to more minutes, then to the most recently heard.
     pub top_songs: Vec<SongStat>,
     pub top_artists: Vec<ArtistStat>,
+    /// Top 25 artists and their listening seconds in this period, for genre weighting.
+    pub artist_seconds: Vec<(String, u64)>,
     /// Minutes heard by the hour a listen started, 0 = midnight to 1 am, local time.
     pub by_hour: [f32; 24],
     /// Minutes heard by weekday, Monday first.
@@ -954,6 +956,7 @@ pub fn summary_back(listens: &[Listen], period: Period, back: u32, now: u64, utc
     let mut played_artists: Vec<(&String, &Artist)> = artists.iter().filter(|(_, a)| a.plays > 0).collect();
     rank(&mut played_artists);
     let top_artists: Vec<ArtistStat> = played_artists.iter().take(TOP).map(|(_, a)| stat(a)).collect();
+    let artist_seconds: Vec<(String, u64)> = played_artists.iter().take(25).map(|(_, a)| (a.name.clone(), a.seconds)).collect();
 
     // Discoveries: when each artist was first played, over all history.
     let mut first_play: HashMap<String, u64> = HashMap::new();
@@ -1008,6 +1011,7 @@ pub fn summary_back(listens: &[Listen], period: Period, back: u32, now: u64, utc
         days: days_played.len() as u32,
         top_songs,
         top_artists,
+        artist_seconds,
         by_hour: by_hour.map(|s| s as f32 / 60.0),
         by_weekday: by_weekday.map(|s| s as f32 / 60.0),
         busiest_day,
