@@ -161,8 +161,10 @@ pub(super) struct StatsState {
     save_note: Arc<Mutex<Option<String>>>,
     /// Path of the most recently saved Wrapped card PNG (for "Open folder" / "Open image").
     last_saved: Arc<Mutex<Option<PathBuf>>>,
-    /// When set, paints the Wrapped card on a 1-frame top overlay so it can be captured from any scroll position.
-    capture_overlay: Option<String>,
+    /// When set, paints the Wrapped card on a top overlay until the screenshot callback finishes
+    /// so it can be captured cleanly from any scroll position.
+    capture_overlay: Option<(String, bool)>,
+    capture_done: Arc<std::sync::atomic::AtomicBool>,
     /// Last drawn screen rect of the Wrapped card, for cropping the screenshot.
     card_rect: Option<Rect>,
     /// Pending background reload result.
@@ -192,6 +194,7 @@ impl StatsState {
             save_note: Arc::new(Mutex::new(None)),
             last_saved: Arc::new(Mutex::new(None)),
             capture_overlay: None,
+            capture_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             card_rect: None,
             pending_load: Arc::new(Mutex::new(None)),
             loading: false,
@@ -560,9 +563,10 @@ impl App {
 
     fn save_wrapped_png(&mut self, ctx: &egui::Context, period_label: &str) {
         let screen = ctx.content_rect();
+        let bar_h = self.bar_height();
         if let Some(rect) = self.stats.card_rect
-            && rect.top() >= screen.top()
-            && rect.bottom() <= screen.bottom()
+            && rect.top() >= screen.top() + 72.0
+            && rect.bottom() <= screen.bottom() - bar_h - 4.0
             && rect.left() >= screen.left()
             && rect.right() <= screen.right()
         {
@@ -573,9 +577,10 @@ impl App {
             *self.stats.save_note.lock().unwrap() = Some("Make the window a little bigger (at least 480×600) to save the card.".into());
             return;
         }
-        // Card is scrolled partially off-screen: paint it cleanly on a 1-frame overlay inside
-        // the viewport so saving always works without asking the user to scroll manually.
-        self.stats.capture_overlay = Some(period_label.to_owned());
+        // Card is scrolled partially off-screen or behind chrome: paint it cleanly on an overlay
+        // until the screenshot callback completes.
+        self.stats.capture_done.store(false, Ordering::Relaxed);
+        self.stats.capture_overlay = Some((period_label.to_owned(), false));
         *self.stats.save_note.lock().unwrap() = Some("Saving…".into());
         ctx.request_repaint();
     }
@@ -586,9 +591,11 @@ impl App {
         let ppp = ctx.pixels_per_point();
         let note_slot = self.stats.save_note.clone();
         let saved_slot = self.stats.last_saved.clone();
+        let done_flag = self.stats.capture_done.clone();
         *note_slot.lock().unwrap() = Some("Saving…".into());
         let wake = ctx.clone();
         ctx.request_screenshot(move |img| {
+            done_flag.store(true, Ordering::Relaxed);
             let res = crop_and_save_png(&img, rect, ppp, &out_path);
             let msg = match res {
                 Ok(()) => {
@@ -1740,7 +1747,10 @@ fn wrapped_section(app: &mut App, ui: &mut Ui, s: &Summary) {
     if save_clicked {
         app.save_wrapped_png(ui.ctx(), &s.label);
     }
-    if let Some(label) = app.stats.capture_overlay.take() {
+    if app.stats.capture_done.load(Ordering::Relaxed) {
+        app.stats.capture_overlay = None;
+    }
+    if let Some((label, requested)) = app.stats.capture_overlay.clone() {
         let screen = ui.ctx().content_rect();
         let origin = pos2(
             (screen.center().x - CARD_W * 0.5).clamp(screen.left(), (screen.right() - CARD_W).max(screen.left())),
@@ -1755,7 +1765,11 @@ fn wrapped_section(app: &mut App, ui: &mut Ui, s: &Summary) {
                 let (rect, _) = ui.allocate_exact_size(vec2(CARD_W, CARD_H), Sense::hover());
                 draw_wrapped_card(ui, rect, style, &data);
             });
-        app.capture_wrapped_rect(ui.ctx(), overlay_rect, &label);
+        if !requested {
+            app.stats.capture_overlay = Some((label.clone(), true));
+            app.capture_wrapped_rect(ui.ctx(), overlay_rect, &label);
+        }
+        ui.ctx().request_repaint();
     }
 }
 
@@ -2550,13 +2564,19 @@ fn is_local_id(id: &str) -> bool {
 }
 
 fn song_track(s: &SongStat) -> Track {
+    let is_yt_video = s.thumbnail.as_deref().is_some_and(|u| u.contains("i.ytimg.com"));
     Track {
         id: s.video_id.clone(),
         title: s.title.clone(),
         artists: stats::split_artists(&s.artist).into_iter().map(|name| Link { name, id: None }).collect(),
         album: (!s.album.is_empty()).then(|| Link { name: s.album.clone(), id: None }),
         duration: None,
-        thumbs: s.thumbnail.as_ref().map(|u| vec![Thumb { url: u.clone(), width: 544, height: 544 }]).unwrap_or_default(),
+        thumbs: s.thumbnail
+            .as_ref()
+            .map(|u| vec![Thumb { url: u.clone(), width: if is_yt_video { 480 } else { 544 }, height: if is_yt_video { 360 } else { 544 } }])
+            .unwrap_or_default(),
+        music_video: is_yt_video,
+        video: is_yt_video,
         ..Default::default()
     }
 }
