@@ -222,6 +222,7 @@ fn track_to_listen(track: &Track, duration_secs: u32) -> Listen {
         at: unix_now(),
         seconds: 0,
         length: if duration_secs > 0 { duration_secs } else { track.duration.unwrap_or(0) },
+        artist_ids: track.artists.iter().filter_map(|a| a.id.as_ref().map(|id| (a.name.clone(), id.clone()))).collect(),
     }
 }
 
@@ -271,6 +272,7 @@ impl App {
                 l.listen.video_id = song.id.clone();
                 l.listen.title = song.title.clone();
                 l.listen.artist = song.artist_line();
+                l.listen.artist_ids = song.artists.iter().filter_map(|a| a.id.as_ref().map(|id| (a.name.clone(), id.clone()))).collect();
                 if let Some(a) = &song.album {
                     l.listen.album = a.name.clone();
                 }
@@ -426,16 +428,16 @@ impl App {
                     }],
                     _ => vec![Thumb { url: format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", l.video_id), width: 480, height: 360 }],
                 };
-                let artists = if l.artist.is_empty() {
-                    Vec::new()
+                let artists: Vec<Link> = if !l.artist_ids.is_empty() {
+                    l.artist_ids.iter().map(|(name, id)| Link { name: name.clone(), id: Some(id.clone()) }).collect()
                 } else {
-                    vec![Link { name: l.artist.clone(), id: None }]
+                    stats::split_artists(&l.artist).into_iter().map(|name| Link { name, id: None }).collect()
                 };
                 let album = (!l.album.is_empty()).then(|| Link { name: l.album.clone(), id: None });
                 let track = Track {
                     id: l.video_id.clone(),
                     title: l.title.clone(),
-                    artists,
+                    artists: artists.clone(),
                     album,
                     duration: (l.length > 0).then_some(l.length),
                     thumbs: thumbs.clone(),
@@ -449,7 +451,7 @@ impl App {
                     thumbs,
                     target: Target::Song(track),
                     round: false,
-                    links: Vec::new(),
+                    links: artists,
                 });
             }
         }
@@ -2551,11 +2553,7 @@ fn song_track(s: &SongStat) -> Track {
     Track {
         id: s.video_id.clone(),
         title: s.title.clone(),
-        artists: if s.artist.is_empty() {
-            Vec::new()
-        } else {
-            vec![Link { name: s.artist.clone(), id: None }]
-        },
+        artists: stats::split_artists(&s.artist).into_iter().map(|name| Link { name, id: None }).collect(),
         album: (!s.album.is_empty()).then(|| Link { name: s.album.clone(), id: None }),
         duration: None,
         thumbs: s.thumbnail.as_ref().map(|u| vec![Thumb { url: u.clone(), width: 544, height: 544 }]).unwrap_or_default(),

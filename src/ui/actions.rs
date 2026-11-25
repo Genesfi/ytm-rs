@@ -135,6 +135,10 @@ impl App {
             Action::Open(Target::Playlist(id)) if id == LIBRARY_SONGS => self.go(Page::Library(LibTab::Saved)),
             Action::Open(Target::Playlist(id)) => self.go(Page::Playlist(id)),
             Action::Open(Target::Artist(id)) => self.go(Page::Artist(id)),
+            Action::FindArtist(name) => {
+                self.loading = true;
+                self.backend.request(Req::FindArtist(name));
+            }
             Action::PlayNext(t) | Action::Enqueue(t) | Action::QueueInsert { track: t, .. } if self.explicit_hidden(&t) => {}
             Action::PlayNext(t) => {
                 let start = self.queue.play_next(t);

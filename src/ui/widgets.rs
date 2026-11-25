@@ -360,7 +360,9 @@ pub fn linked_text(
     let rtl = crate::bidi::has_rtl(text);
     let mut search_from = 0;
     for (i, l) in links.iter().enumerate() {
-        let Some(id) = &l.id else { continue };
+        if l.name.is_empty() {
+            continue;
+        }
         let name = crate::bidi::visual(&l.name);
         let from = if rtl { 0 } else { search_from };
         let Some(off) = shown[from..].find(name.as_ref()) else { continue };
@@ -381,7 +383,11 @@ pub fn linked_text(
             ui.painter().hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.0, color));
         }
         if resp.clicked() {
-            acts.push(Action::Open(Target::Artist(id.clone())));
+            if let Some(id) = &l.id {
+                acts.push(Action::Open(Target::Artist(id.clone())));
+            } else {
+                acts.push(Action::FindArtist(l.name.clone()));
+            }
         }
     }
     ui.painter().galley(pos, g.clone(), color);

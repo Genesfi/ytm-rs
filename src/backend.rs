@@ -45,6 +45,7 @@ pub enum Req {
     /// `load` comes back with the album, so an older answer can't replace a newer one.
     Album { id: String, load: u64 },
     Artist(String),
+    FindArtist(String),
     /// `stream`: send the first page as soon as it's in and the rest as they come,
     /// rather than all of it at the end.
     Playlist { id: String, load: u64, stream: bool },
@@ -155,7 +156,7 @@ impl Req {
             Req::Suggest { .. } => crate::tr!("settings-search"),
             Req::ForgetSearch(_) => crate::tr!("nav-remove-recent-search"),
             Req::Album { .. } => crate::tr!("ui-album"),
-            Req::Artist(_) => crate::tr!("ui-artist"),
+            Req::Artist(_) | Req::FindArtist(_) => crate::tr!("ui-artist"),
             Req::Playlist { .. } => crate::tr!("transfer-playlist"),
             Req::Library => crate::tr!("nav-library"),
             Req::History => crate::tr!("nav-history"),
@@ -400,6 +401,7 @@ pub enum Resp {
     /// The next page of a playlist sent as `Collection` with the same `load`.
     CollectionMore { id: String, load: u64, tracks: Vec<Track>, set_ids: Vec<Option<String>>, more: bool, failed: bool },
     Artist(ArtistPage),
+    FoundArtist { id: Option<String>, name: String },
     Library(Library),
     History(Vec<Track>),
     Uploads(Vec<Track>),
@@ -1161,6 +1163,18 @@ impl Backend {
                 Req::Playlist { id, load, stream: false } => Resp::Collection { load, c: ytm::playlist(api, &id, me, None).await?, more: false },
                 Req::Playlist { id, load, stream: true } => self.stream_playlist(id, load, me).await?,
                 Req::Artist(id) => Resp::Artist(ytm::artist(api, &id, me).await?),
+                Req::FindArtist(name) => {
+                    let found = ytm::search_cards(api, &name, ytm::Filter::Artists, false).await?;
+                    let id = found
+                        .iter()
+                        .find(|c| c.title.eq_ignore_ascii_case(&name))
+                        .or_else(|| found.first())
+                        .and_then(|c| match &c.target {
+                            Target::Artist(id) => Some(id.clone()),
+                            _ => None,
+                        });
+                    Resp::FoundArtist { id, name }
+                }
                 Req::Library => self.library().await?,
                 Req::History => Resp::History(ytm::history(api).await?),
                 Req::Uploads => Resp::Uploads(ytm::uploads(api).await?),

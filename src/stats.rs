@@ -40,6 +40,8 @@ pub struct Listen {
     pub seconds: u32,
     /// The song's length in seconds, 0 when unknown.
     pub length: u32,
+    /// Optional `(artist_name, browse_id)` pairs so history cards link straight to artist pages.
+    pub artist_ids: Vec<(String, String)>,
 }
 
 /// A file's lightweight fingerprint (modified time + length) for detecting changes
@@ -103,12 +105,26 @@ fn to_json(l: &Listen) -> Value {
     if let Some(t) = &l.thumbnail {
         v["thumb"] = Value::String(t.clone());
     }
+    if !l.artist_ids.is_empty() {
+        v["artist_ids"] = Value::Array(l.artist_ids.iter().map(|(n, id)| json!([n, id])).collect());
+    }
     v
 }
 
 fn from_json(v: &Value) -> Option<Listen> {
     let text = |k: &str| v[k].as_str().unwrap_or_default().to_string();
     let video_id = v["id"].as_str()?.to_string();
+    let artist_ids = v["artist_ids"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let pair = item.as_array()?;
+                    Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(Listen {
         video_id,
         title: text("title"),
@@ -118,6 +134,7 @@ fn from_json(v: &Value) -> Option<Listen> {
         at: v["at"].as_u64()?,
         seconds: v["sec"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
         length: v["len"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
+        artist_ids,
     })
 }
 
@@ -1029,6 +1046,7 @@ mod tests {
             at,
             seconds,
             length: 200,
+            artist_ids: Vec::new(),
         }
     }
 

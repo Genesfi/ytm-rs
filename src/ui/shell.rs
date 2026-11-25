@@ -1583,9 +1583,13 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
             let resp = named(ui.interact(byline_area, ui.scope_id().with("byline"), Sense::click()), &t.artist_line()).on_hover_cursor(egui::CursorIcon::PointingHand);
             menu_on.push(resp.clone());
             if resp.clicked()
-                && let Some(id) = t.artists.first().and_then(|a| a.id.clone())
+                && let Some(first) = t.artists.first()
             {
-                app.actions.push(Action::Open(Target::Artist(id)));
+                if let Some(id) = &first.id {
+                    app.actions.push(Action::Open(Target::Artist(id.clone())));
+                } else if !first.name.is_empty() {
+                    app.actions.push(Action::FindArtist(first.name.clone()));
+                }
             }
             ax = x + w;
         } else {
@@ -1594,7 +1598,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
                 let s = if i + 1 < t.artists.len() { format!("{}, ", a.name) } else { a.name.clone() };
                 let (r, elided) = widgets::text_at_elided(ui, pos2(ax, cy + 2.0), &s, theme::regular(chrome.bar_byline_px), theme::with_alpha(theme::text_dim(), chrome.bar_byline_alpha), (x + w - ax).max(10.0));
                 let clipped = elided || (i + 1 < t.artists.len() && r.right() > x + w);
-                if let Some(id) = &a.id {
+                if !a.name.is_empty() {
                     let resp = ui.interact(r, ui.scope_id().with(("artist", i)), Sense::click());
                     let resp = named(resp, &a.name).on_hover_cursor(egui::CursorIcon::PointingHand);
                     let resp = if clipped { resp.on_hover_text(&full_artists) } else { resp };
@@ -1603,7 +1607,11 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
                         ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, theme::text_dim()));
                     }
                     if resp.clicked() {
-                        app.actions.push(Action::Open(Target::Artist(id.clone())));
+                        if let Some(id) = &a.id {
+                            app.actions.push(Action::Open(Target::Artist(id.clone())));
+                        } else {
+                            app.actions.push(Action::FindArtist(a.name.clone()));
+                        }
                     }
                 } else if clipped {
                     ui.interact(r, ui.scope_id().with(("artist-tip", i)), Sense::hover()).on_hover_text(&full_artists);

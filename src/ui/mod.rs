@@ -241,6 +241,7 @@ pub enum Action {
     PlayCollection(Target, bool),
     /// Click on a card: songs start a radio, everything else opens its page.
     Open(Target),
+    FindArtist(String),
     PlayNext(Track),
     Enqueue(Track),
     Radio(Track),

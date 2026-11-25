@@ -280,6 +280,14 @@ impl App {
                 }
                 self.artist = Some(a);
             }
+            Resp::FoundArtist { id, name } => {
+                self.loading = false;
+                if let Some(id) = id {
+                    self.go(Page::Artist(id));
+                } else {
+                    self.go(Page::Search(name));
+                }
+            }
             Resp::Library(mut l) => {
                 // A half that didn't load keeps what was shown (or last launch's sidebar),
                 // rather than emptying it.
