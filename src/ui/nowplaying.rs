@@ -1149,7 +1149,7 @@ fn corner_block(app: &mut App, ui: &mut Ui, r: Rect, track: &crate::model::Track
     let np = &look.now_playing;
     text_at(ui, pos2(x, r.bottom() - np.title_px - np.artist_px - 18.0), &track.title, theme::bold(np.title_px), Color32::WHITE, w);
     let line = track.artist_line();
-    widgets::linked_text(ui, pos2(x, r.bottom() - np.artist_px - 8.0), &line, &track.artists, theme::regular(np.artist_px), theme::text_dim(), w, &mut app.actions);
+    widgets::linked_text_for(ui, pos2(x, r.bottom() - np.artist_px - 8.0), &line, &track.artists, theme::regular(np.artist_px), theme::text_dim(), w, Some(&track.id), &mut app.actions);
 }
 
 /// The most room the theme's card takes in `content`: its text-only card is no wider or taller.
@@ -1180,7 +1180,7 @@ fn info_card(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::Tr
             text_at(ui, at + vec2(0.0, y), &track.title, theme::weighted(card_title, title_px), theme::shade(a), room);
         }
         text_at(ui, at, &track.title, theme::weighted(card_title, title_px), Color32::WHITE, room);
-        widgets::linked_text(ui, at + vec2(0.0, title_px * 1.3 + 2.0), &line, &track.artists, theme::weighted(card_artist, artist_px), theme::text_dim(), room, &mut app.actions);
+        widgets::linked_text_for(ui, at + vec2(0.0, title_px * 1.3 + 2.0), &line, &track.artists, theme::weighted(card_artist, artist_px), theme::text_dim(), room, Some(&track.id), &mut app.actions);
         return;
     }
     if let Some(g) = app.look().app.glass.title_card {
@@ -1195,7 +1195,7 @@ fn info_card(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::Tr
     }
     text_at(ui, pos2(art.right() + 12.0, r.top() + 14.0), &track.title, theme::weighted(card_title, np.title_px.min(18.0)), Color32::WHITE, w);
     let line = track.artist_line();
-    widgets::linked_text(ui, pos2(art.right() + 12.0, r.top() + 40.0), &line, &track.artists, theme::weighted(card_artist, np.artist_px.min(14.0)), theme::text_dim(), w, &mut app.actions);
+    widgets::linked_text_for(ui, pos2(art.right() + 12.0, r.top() + 40.0), &line, &track.artists, theme::weighted(card_artist, np.artist_px.min(14.0)), theme::text_dim(), w, Some(&track.id), &mut app.actions);
 }
 
 /// Since when the pointer has been still over full screen's cover.
@@ -1652,7 +1652,7 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
             widgets::title_at(ui, pos2(title_x, title_y), &track.title, track.explicit, title_font, theme::with_alpha(Color32::WHITE, np.title_alpha), w);
         }
         // Each artist opens their own page (features included).
-        widgets::linked_text(ui, pos2(artist_x, title_y + title_px * 1.4), &line, &track.artists, artist_font, theme::with_alpha(theme::text_dim(), np.artist_alpha), w, &mut app.actions);
+        widgets::linked_text_for(ui, pos2(artist_x, title_y + title_px * 1.4), &line, &track.artists, artist_font, theme::with_alpha(theme::text_dim(), np.artist_alpha), w, Some(&track.id), &mut app.actions);
     }
     if no_lyrics && app.np_tab == NpTab::Lyrics {
         // A brief note, faded out after a few seconds.
@@ -1813,7 +1813,7 @@ fn video_stage(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::
         let tx = x_of(&track.title, theme::bold(title_px), ui);
         let ax = x_of(&line, theme::regular(artist_px), ui);
         widgets::title_at(ui, pos2(tx, y), &track.title, track.explicit, theme::bold(title_px), Color32::WHITE, fit.x);
-        widgets::linked_text(ui, pos2(ax, y + title_px * 1.4), &line, &track.artists, theme::regular(artist_px), theme::text_dim(), fit.x, &mut app.actions);
+        widgets::linked_text_for(ui, pos2(ax, y + title_px * 1.4), &line, &track.artists, theme::regular(artist_px), theme::text_dim(), fit.x, Some(&track.id), &mut app.actions);
     }
     if look.now_playing.video_pill {
         video_line_pill(app, ui, picture);
@@ -1965,7 +1965,7 @@ fn video_fullscreen(app: &mut App, ui: &mut Ui, rect: Rect, track: &crate::model
     let text_w = rect.width() - 56.0;
     widgets::title_at(ui, pos2(rect.left() + 28.0, rect.top() + 22.0), &track.title, track.explicit, theme::bold(20.0), Color32::WHITE, text_w);
     let line = track.artist_line();
-    widgets::linked_text(ui, pos2(rect.left() + 28.0, rect.top() + 50.0), &line, &track.artists, theme::regular(15.0), theme::text_dim(), text_w, &mut app.actions);
+    widgets::linked_text_for(ui, pos2(rect.left() + 28.0, rect.top() + 50.0), &line, &track.artists, theme::regular(15.0), theme::text_dim(), text_w, Some(&track.id), &mut app.actions);
 
     let (pos, total) = song_times(app, track);
     let line_y = rect.bottom() - 66.0;

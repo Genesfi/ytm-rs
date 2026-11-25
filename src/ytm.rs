@@ -1178,6 +1178,22 @@ pub async fn radio(api: &Api, video_id: &str, auth: bool, limit: usize) -> anyho
     Ok(radio_tracks(&items).cloned().collect())
 }
 
+/// Resolve an artist's `browseId` from a video's `next` panel when a listen came from
+/// history without stored artist IDs (works for both official artists and user channels).
+pub async fn artist_from_video(api: &Api, video_id: &str, name: &str) -> Option<String> {
+    let v = api.call("next", json!({ "videoId": video_id }), false).await.ok()?;
+    let panel = &v["contents"]["singleColumnMusicWatchNextResultsRenderer"]["tabbedRenderer"]["watchNextTabbedResultsRenderer"]["tabs"][0]
+        ["tabRenderer"]["content"]["musicQueueRenderer"]["content"]["playlistPanelRenderer"];
+    let (items, _) = panel_page(panel);
+    let (track, _) = items.first()?;
+    track
+        .artists
+        .iter()
+        .find(|a| a.name.eq_ignore_ascii_case(name))
+        .or_else(|| (track.artists.len() == 1).then(|| &track.artists[0]))
+        .and_then(|a| a.id.clone())
+}
+
 /// A radio's songs, without its videos (`is_video`); all of it when it's videos only.
 fn radio_tracks(items: &[(Track, bool)]) -> impl Iterator<Item = &Track> {
     let songs = items.iter().any(|(_, video)| !video);

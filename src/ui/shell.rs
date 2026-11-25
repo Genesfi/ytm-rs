@@ -1588,7 +1588,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
                 if let Some(id) = &first.id {
                     app.actions.push(Action::Open(Target::Artist(id.clone())));
                 } else if !first.name.is_empty() {
-                    app.actions.push(Action::FindArtist(first.name.clone()));
+                    app.actions.push(Action::FindArtist { name: first.name.clone(), video_id: Some(t.id.clone()) });
                 }
             }
             ax = x + w;
@@ -1610,7 +1610,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
                         if let Some(id) = &a.id {
                             app.actions.push(Action::Open(Target::Artist(id.clone())));
                         } else {
-                            app.actions.push(Action::FindArtist(a.name.clone()));
+                            app.actions.push(Action::FindArtist { name: a.name.clone(), video_id: Some(t.id.clone()) });
                         }
                     }
                 } else if clipped {

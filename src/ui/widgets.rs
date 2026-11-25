@@ -352,6 +352,21 @@ pub fn linked_text(
     width: f32,
     acts: &mut Vec<Action>,
 ) -> Rect {
+    linked_text_for(ui, pos, text, links, font, color, width, None, acts)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn linked_text_for(
+    ui: &Ui,
+    pos: Pos2,
+    text: &str,
+    links: &[Link],
+    font: egui::FontId,
+    color: Color32,
+    width: f32,
+    video_id: Option<&str>,
+    acts: &mut Vec<Action>,
+) -> Rect {
     let g = galley(ui, text, font, color, width);
     let rect = Rect::from_min_size(pos, g.size());
     // Names are found in the text as shown: right-to-left text is reordered, its names
@@ -386,7 +401,7 @@ pub fn linked_text(
             if let Some(id) = &l.id {
                 acts.push(Action::Open(Target::Artist(id.clone())));
             } else {
-                acts.push(Action::FindArtist(l.name.clone()));
+                acts.push(Action::FindArtist { name: l.name.clone(), video_id: video_id.map(str::to_owned) });
             }
         }
     }
@@ -971,7 +986,11 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, pin: Option<bool>, a
     let title_pos = pos2(rect.left(), img.bottom() + 10.0);
     galley_tipped(ui, title_pos, title, tcolor, &c.title);
     let sub_y = img.bottom() + 14.0 + title_h;
-    linked_text(ui, pos2(rect.left(), sub_y), &c.subtitle, &c.links, theme::regular(13.0), theme::with_alpha(theme::text_dim(), cl.subtitle_alpha), width - 36.0, acts);
+    let vid = match &c.target {
+        Target::Song(t) => Some(t.id.as_str()),
+        _ => None,
+    };
+    linked_text_for(ui, pos2(rect.left(), sub_y), &c.subtitle, &c.links, theme::regular(13.0), theme::with_alpha(theme::text_dim(), cl.subtitle_alpha), width - 36.0, vid, acts);
     // On the subtitle line, whose width leaves room for it, so a two-line title never sits under it.
     let more_rect = Rect::from_center_size(pos2(rect.right() - 16.0, sub_y + 8.0), Vec2::splat(30.0));
     let more = more_button(ui, more_rect, resp.id.with("more"), crate::tr!("ui-options"));
@@ -1723,7 +1742,7 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     let title_y = if sub.is_some() { cy - 18.0 } else { cy - 9.0 };
     title_at(ui, pos2(x, title_y), &t.title, t.explicit, theme::semibold(14.5), title_col, title_w);
     if let Some(sub) = &sub {
-        linked_text(ui, pos2(x, cy + 2.0), sub, &t.artists, theme::regular(13.0), dim, title_w, acts);
+        linked_text_for(ui, pos2(x, cy + 2.0), sub, &t.artists, theme::regular(13.0), dim, title_w, Some(&t.id), acts);
     }
     if let (Some(px), Some(p)) = (plays_x, &plays) {
         ui.painter().text(pos2(px, cy), Align2::LEFT_CENTER, p, theme::regular(13.5), dim);
