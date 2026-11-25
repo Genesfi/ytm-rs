@@ -330,6 +330,9 @@ enum Dialog {
     ConfirmClearCache,
     /// A large download (`count` songs to go) asked about before it starts.
     ConfirmDownload { target: Option<Target>, title: String, tracks: Vec<Track>, count: usize },
+    /// An add YouTube Music refused, as some of `tracks` are in the playlist already:
+    /// add them anyway, skip those, or not. `duplicates` names them, by title, when known.
+    ConfirmAddDuplicates { playlist_id: String, playlist_title: String, tracks: Vec<Track>, duplicates: Vec<String> },
     /// `info` until it loads; `busy` while a change is on its way; `confirm_off` asks
     /// before turning collaboration off (that removes the collaborators).
     Collaborate { id: String, info: Option<crate::ytm::Collaboration>, busy: bool, confirm_off: bool },
@@ -483,6 +486,14 @@ pub struct App {
     loading: bool,
     /// The current page's request failed with nothing cached: show a retry, not a skeleton.
     load_failed: bool,
+    /// It failed because YouTube Music can't be reached: the retry says so, and offers
+    /// Downloads, which play without it.
+    offline: bool,
+    /// When to next ask whether it can be reached again (`Req::Reachable`), while it says
+    /// so: `None` until the page has said so a while.
+    online_check: Option<f64>,
+    /// How long until the check after that, doubling each time up to [`ONLINE_WAIT_MOST`].
+    online_wait: f64,
     search_text: String,
     /// What was typed, the search terms for it, and the songs, artists and albums it
     /// most likely means.
@@ -648,6 +659,8 @@ pub struct App {
 
     // visuals
     art_key: Option<String>,
+    /// `art_key`'s song got no cover: asked again next time, in case it was the network.
+    art_uncovered: bool,
     art_changed: f64,
     art_brightness: f32,
     accent: Color32,
@@ -672,8 +685,14 @@ pub struct App {
     /// The animated background's speed and brightness, as multiples of the theme's.
     bg_speed: f32,
     bg_brightness: f32,
+    /// One colour behind the pages and Now playing, instead of the album art or gradient.
+    flat_bg: bool,
+    /// The colour, once picked. None uses the theme's own flat colour.
+    flat_color: Option<egui::Color32>,
     /// Panels frost what's behind them, in themes that have them do so.
     glass_on: bool,
+    /// The app's own title bar: the window buttons square along the top right, not in a notch.
+    classic_titlebar: bool,
     reactive_bg: bool,
     /// Bars along the bottom of now playing that move with the music (off unless switched on).
     visualizer: bool,
@@ -837,6 +856,9 @@ pub struct App {
     // window
     /// Clicking × hides the window to the tray instead of quitting.
     close_to_tray: bool,
+    /// Linux, Wayland session: an X11 window from the next start, so the mini player can
+    /// stay above other windows.
+    mini_x11: bool,
     /// Settings › Window: draw with wgpu (Vulkan) from the next start (renderer.rs).
     pub(super) wgpu_renderer: bool,
     /// Settings › App icon (`appicon::ALL` id).
@@ -998,6 +1020,9 @@ impl App {
             track_art: None,
             loading: false,
             load_failed: false,
+            offline: false,
+            online_check: None,
+            online_wait: ONLINE_WAIT_FIRST,
             search_text: String::new(),
             suggestions: Default::default(),
             suggest_sel: None,
@@ -1094,6 +1119,7 @@ impl App {
                 .filter(|_| !crate::update::flatpak())
                 .map_or_else(|| crate::update::is_nightly(&crate::update::build_version()), |v| v == "nightly"),
             close_to_tray: get("close_to_tray").is_some_and(|v| v == "1"),
+            mini_x11: get("mini_x11").is_some_and(|v| v == "1"),
             wgpu_renderer,
             app_icon,
             tray: None,
@@ -1138,6 +1164,7 @@ impl App {
             seek_drag: None,
             seek_wheel: seek_wheel::SeekWheel::default(),
             art_key: None,
+            art_uncovered: false,
             art_changed: -10.0,
             art_brightness: 0.0,
             accent: theme::RED,
@@ -1157,7 +1184,10 @@ impl App {
             anim_bg: get("anim_bg").is_none_or(|v| v == "1"),
             bg_speed: shell::load_factor(get("bg_speed"), shell::BG_SPEED),
             bg_brightness: shell::load_factor(get("bg_brightness"), shell::BG_BRIGHTNESS),
+            flat_bg: get("flat_bg").is_some_and(|v| v == "1"),
+            flat_color: get("flat_color").as_deref().and_then(crate::preset::hex),
             glass_on: get("glass_on").is_none_or(|v| v == "1"),
+            classic_titlebar: get("classic_titlebar").is_some_and(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
             visualizer: get("visualizer").is_some_and(|v| v == "1"),
             dim_bright: get("dim_bright").is_none_or(|v| v == "1"),
@@ -1427,6 +1457,9 @@ impl App {
     /// showing the cached copy meanwhile.
     fn page_loaded(&mut self) {
         self.page_changed = -1.0; // stamped with the frame time on the next pass
+        // A page asked for afresh checks whether it's back soon again.
+        self.online_check = None;
+        self.online_wait = ONLINE_WAIT_FIRST;
         // The search box holds the query of the search page you're on, and is empty elsewhere.
         self.search_text = match &self.page {
             Page::Search(q) => q.clone(),
@@ -1506,6 +1539,7 @@ impl App {
         let coming = self.page_list().is_some_and(|id| self.lists.loading(id));
         self.loading = (req.is_some() || coming) && !cached;
         self.load_failed = false;
+        self.offline = false;
         match req {
             Some(Req::Library) => self.request_library(),
             Some(r) => self.backend.request(r),
@@ -1668,7 +1702,7 @@ impl App {
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
-        let msg = msg.into();
+        let msg = without_urls(msg.into());
         if !self.pending_unlikes().is_empty() {
             self.toast_after_unlike = Some(msg);
             return;
@@ -1894,7 +1928,7 @@ impl eframe::App for App {
         } else if playing && widgets::equalizer_shown(ctx) {
             // The playing row's bars need a steady, full rate to read as smooth.
             pace::repaint_after(ctx, Duration::from_millis(16));
-        } else if playing && self.anim_bg && shell::pages_bg_moves(self.look()) {
+        } else if playing && self.anim_bg && !self.flat_bg && shell::pages_bg_moves(self.look()) {
             pace::repaint_after(ctx, Duration::from_millis(66));
         } else if playing || self.buffering {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -1947,12 +1981,14 @@ impl eframe::App for App {
         if self.chrome_applied.is_some() && theme::fonts_became_ready() {
             self.chrome_applied = Some(String::new());
         }
-        if self.chrome_applied.as_deref() != Some(look.id.as_str()) {
+        // With the lyrics look picked from another theme, whose font may be another too.
+        let chrome = format!("{}|{}", look.id, self.lyric_prefs.look.as_deref().unwrap_or_default());
+        if self.chrome_applied.as_deref() != Some(chrome.as_str()) {
             if self.chrome_applied.is_none() {
                 ctx.add_texture_loader(Arc::new(crate::images::Textures::default()));
             }
-            theme::apply_chrome(&ctx, look);
-            self.chrome_applied = Some(look.id.clone());
+            theme::apply_chrome(&ctx, look, self.lyric_prefs.style(look));
+            self.chrome_applied = Some(chrome);
         }
         let accent = self.accent_color();
         ctx.data_mut(|d| d.insert_temp(egui::Id::unique("accent"), accent));
@@ -1968,6 +2004,7 @@ impl eframe::App for App {
         // bar, so the pages and the full-screen background under it aren't drawn.
         let covered = !self.fullscreen && np >= 1.0;
         titlebar::set_fullscreen(&ctx, self.fullscreen);
+        titlebar::set_classic(&ctx, self.classic_titlebar);
         // Mid-switch to or from the mini player, the frame stays as it is.
         titlebar::sync(&ctx, (layout != mini::Layout::Blank).then_some(layout == mini::Layout::Full));
         dev::dev_memory(&ctx, now);
@@ -2095,7 +2132,7 @@ impl eframe::App for App {
                 .frame(side_frame)
                 .show_separator_line(false)
                 .show(ui, |ui| {
-                    if let (Some([a, px]), Some(bg)) = (app_style.nav_item.cover_tint.filter(|_| !light), self.bg.as_ref()) {
+                    if let (Some([a, px]), Some(bg)) = (app_style.nav_item.cover_tint.filter(|_| !light && !self.flat_bg), self.bg.as_ref()) {
                         // The cover's blur showing through the top of the sidebar, fading out.
                         let r = ui.max_rect().expand2(egui::vec2(14.0, 0.0));
                         let band = egui::Rect::from_min_size(egui::pos2(r.left(), screen.top()), egui::vec2(r.width(), px));
@@ -2211,6 +2248,8 @@ impl eframe::App for App {
         recognize::inline(self, &ctx);
         shell::toast(self, &ctx, now);
 
+        // Full screen may have come or gone this frame, and the buttons go with it.
+        titlebar::set_fullscreen(&ctx, self.fullscreen);
         titlebar::window_buttons(&ctx);
         titlebar::resize_edges(&ctx);
         // Back from the mini player.
@@ -2228,6 +2267,7 @@ impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.zoom = ctx.zoom_factor();
         dev::dev_script(ctx, raw);
+        row_drag::note_pointer(ctx, &raw.events);
         // Dev hook: YTM_LOG_WHEEL=1 logs the wheel events the window sends.
         if dev_var("YTM_LOG_WHEEL").is_some() {
             for e in raw.events.iter().filter(|e| matches!(e, egui::Event::MouseWheel { .. })) {
@@ -2322,6 +2362,7 @@ impl eframe::App for App {
             self.good_window = Some(w);
         }
         storage.set_string("close_to_tray", b(self.close_to_tray));
+        storage.set_string("mini_x11", b(self.mini_x11));
         storage.set_string("song_notifications", b(self.song_notifications));
         let start = START_PAGES.iter().find(|(.., p)| *p == self.start_page).map_or("home", |(k, ..)| k);
         storage.set_string("start_page", start.to_owned());
@@ -2353,7 +2394,12 @@ impl eframe::App for App {
         storage.set_string("queue_width", format!("{:.0}", self.queue_w));
         storage.set_string("bg_speed", format!("{:.2}", self.bg_speed));
         storage.set_string("bg_brightness", format!("{:.2}", self.bg_brightness));
+        storage.set_string("flat_bg", b(self.flat_bg));
+        if let Some(c) = self.flat_color {
+            storage.set_string("flat_color", format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()));
+        }
         storage.set_string("glass_on", b(self.glass_on));
+        storage.set_string("classic_titlebar", b(self.classic_titlebar));
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("visualizer", b(self.visualizer));
         storage.set_string("dim_bright", b(self.dim_bright));
@@ -2638,6 +2684,61 @@ pub fn fmt_end(pos: f32, total: f32, left: bool) -> String {
 /// the length ("-0:51 / 1:27"), so one side runs and the other stays put either way.
 pub fn fmt_running(pos: f32, total: f32, left: bool) -> String {
     format!("{} / {}", fmt_left(pos, total, left).unwrap_or_else(|| fmt_time(pos as u32)), fmt_time(total as u32))
+}
+
+/// While a page says YouTube Music can't be reached, the first check whether it can be
+/// again, seconds after it said so, and the longest wait between checks (#366).
+const ONLINE_WAIT_FIRST: f64 = 5.0;
+const ONLINE_WAIT_MOST: f64 = 60.0;
+
+/// What to say when YouTube Music can't be reached (`Resp::Offline`). `on_downloads`: the
+/// page is Library › Downloads, which it needn't point to. Through a proxy, that's the
+/// likelier cause, and where to look.
+fn offline_text(on_downloads: bool) -> &'static str {
+    if crate::proxy::in_use() {
+        crate::tr!("backend-offline-proxy")
+    } else if on_downloads {
+        crate::tr!("backend-offline-in-downloads")
+    } else {
+        crate::tr!("backend-offline")
+    }
+}
+
+/// `msg` without the request URLs reqwest's errors name ("… for url (https://…)"), which
+/// tell a listener nothing and run a toast across the window (#361). The log keeps them.
+fn without_urls(mut msg: String) -> String {
+    const AT: &str = " for url (";
+    while let Some(start) = msg.find(AT) {
+        // Up to the bracket that closes it.
+        let open = start + AT.len() - 1;
+        let mut depth = 0;
+        let end = msg[open..].char_indices().find_map(|(i, c)| {
+            depth += match c {
+                '(' => 1,
+                ')' => -1,
+                _ => 0,
+            };
+            (depth == 0).then_some(open + i + 1)
+        });
+        let Some(end) = end else { break };
+        msg.replace_range(start..end, "");
+    }
+    msg
+}
+
+#[cfg(test)]
+mod toast_tests {
+    #[test]
+    fn toasts_leave_request_urls_out() {
+        let msg = "Home failed: error sending request for url (https://music.youtube.com/youtubei/v1/browse?prettyPrint=false)";
+        assert_eq!(super::without_urls(msg.into()), "Home failed: error sending request");
+        // Every one, and what's around them stays.
+        let chain = "HTTP status server error (500 Internal Server Error) for url (https://a.example/x?q=(1)): retried for url (http://b.example/)";
+        assert_eq!(super::without_urls(chain.into()), "HTTP status server error (500 Internal Server Error): retried");
+        for kept in ["Couldn't play “Song”: no data for 20 s", "Added to (my) playlist", "a for url (unclosed"] {
+            assert_eq!(super::without_urls(kept.into()), kept);
+        }
+    }
 }
 
 #[cfg(test)]

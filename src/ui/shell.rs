@@ -55,7 +55,7 @@ fn gradient(painter: &egui::Painter, rect: Rect, c: [Color32; 4]) {
 /// playing uses.
 fn page_mode(look: &crate::preset::Preset) -> crate::preset::BgMode {
     use crate::preset::{BgMode, PageBg};
-    // A theme file's background is the page.
+    // A theme file's background is the page. A flat colour returns before this.
     if theme::file_background().is_some() {
         return BgMode::Solid;
     }
@@ -106,8 +106,14 @@ pub fn background_clock(app: &mut App, now: f64) {
 
 /// The background's flat colour, under its art and gradients.
 pub fn base_color(app: &App) -> Color32 {
-    // A theme file's background is the page's flat colour.
-    if theme::file_background().is_some() { theme::bg() } else { app.look().solid() }
+    // The listener's colour, else a theme file's background, else the theme's own.
+    if app.flat_bg {
+        app.flat_color.unwrap_or_else(|| app.look().solid())
+    } else if theme::file_background().is_some() {
+        theme::bg()
+    } else {
+        app.look().solid()
+    }
 }
 
 /// The docked or floating player bar's fill at `alpha`.
@@ -123,6 +129,12 @@ pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64) {
     background_clock(app, now);
     let look = app.look();
     let b = &look.background;
+    let painter = ui.painter().clone();
+    // One colour, even where Windows' material would otherwise show through.
+    if app.flat_bg {
+        painter.rect_filled(screen, 0.0, base_color(app));
+        return;
+    }
     let mode = page_mode(look);
     // Light pages are the art at full strength under a white wash, a pale tint of the cover.
     let light = theme::light();
@@ -130,7 +142,6 @@ pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64) {
     // Darker still where bright art would show through too bright for white text (the
     // shade drawn over it below takes about a third off).
     let dim = if light || !app.dim_bright { dim } else { dim * crate::art::readable_dim(app.art_brightness * dim * (1.0 - 0.335)) };
-    let painter = ui.painter().clone();
     // Windows' material shows through instead of the theme's colour, lightly tinted.
     if crate::backdrop::shows() {
         painter.rect_filled(screen, 0.0, if light { Color32::from_white_alpha(40) } else { Color32::from_black_alpha(40) });
@@ -581,7 +592,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                     app.actions.push(Action::Like(t, true));
                     app.toast(crate::tr!("status-added-liked"));
                 }
-                Some((playlist_id, t)) => app.add_to_playlist(playlist_id, &[t]),
+                Some((playlist_id, t)) => app.add_to_playlist(playlist_id, &[t], crate::ytm::Duplicates::Ask),
                 None => {}
             }
         });
@@ -1123,8 +1134,7 @@ fn suggestion_text(ui: &Ui, pos: Pos2, text: &str, typed: &str, width: f32) {
     job.append(rest, 0.0, egui::TextFormat { font_id: theme::regular(15.0), color: theme::text_dim(), ..Default::default() });
     job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(10.0));
     let g = ui.fonts_mut(|f| f.layout_job(job));
-    ui.painter().galley(pos, g.clone(), theme::text());
-    widgets::tip_if_elided(ui, Rect::from_min_size(pos, g.size()), &g, text);
+    widgets::galley_tipped(ui, pos, g, theme::text(), text);
 }
 
 // ------------------------------------------------------------------ player bar
@@ -1963,43 +1973,52 @@ pub fn queue_drawer(app: &mut App, ui: &mut Ui) {
         ui.painter().rect_filled(r, 0.0, theme::shade(0.35));
         white_on_card = theme::light();
     }
-    let header_rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 34.0));
-    let (header_row, _) = ui.allocate_exact_size(header_rect.size(), Sense::hover());
-    let mut header_ui = ui.new_child(egui::UiBuilder::new().max_rect(header_row));
-    let right_end = header_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        // Left of the window buttons, which sit over the drawer's top right.
-        ui.add_space(super::titlebar::right_gap(ui.ctx(), ui.max_rect(), 0.0));
-        let close = if white_on_card {
-            let (r, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
-            let resp = named(resp, crate::tr!("ui-close-queue")).on_hover_text(crate::tr!("ui-close-queue")).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
-            ui.painter().circle_filled(r.center(), 16.0, theme::with_alpha(Color32::WHITE, 0.15 * h));
-            widgets::focus_ring(ui, &resp, r, 16.0);
-            icon_at(ui, r.center(), icon::X, 16.0, Color32::WHITE);
-            resp
-        } else {
-            icon_button(ui, icon::X, 16.0, crate::tr!("ui-close-queue"), false)
-        };
-        if close.clicked() {
-            app.queue_open = false;
-        }
-        // Left of Close, with more in the queue than the song playing.
-        if app.queue.tracks.len() > usize::from(app.queue.index.is_some()) && icon_button(ui, icon::TRASH_2, 15.0, crate::tr!("ui-clear-queue"), false).clicked() {
-            app.actions.push(Action::QueueClear);
-        }
-        ui.cursor().left()
-    }).inner;
-
-    let title_w = (right_end - header_row.left() - 8.0).max(0.0);
-    let title_rect = Rect::from_min_size(header_row.min, vec2(title_w, header_row.height()));
-    let mut title_ui = header_ui.new_child(egui::UiBuilder::new().max_rect(title_rect));
-    title_ui.set_clip_rect(title_rect.intersect(ui.clip_rect()));
-    let label = crate::tr!("ui-up-next");
-    let (label, size) = if q.queue_upper { (label.to_uppercase(), 13.0) } else { (label.to_owned(), 20.0) };
-    let heading = egui::RichText::new(label).font(theme::bold(size));
-    title_ui.add(egui::Label::new(if white_on_card { heading.color(Color32::WHITE) } else { heading }).truncate());
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Left of the window buttons, which sit over the drawer's top right.
+            ui.add_space(super::titlebar::right_gap(ui.ctx(), ui.max_rect(), 0.0));
+            let close = if white_on_card {
+                let (r, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+                let resp = named(resp, crate::tr!("ui-close-queue")).on_hover_text(crate::tr!("ui-close-queue")).on_hover_cursor(egui::CursorIcon::PointingHand);
+                let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+                ui.painter().circle_filled(r.center(), 16.0, theme::with_alpha(Color32::WHITE, 0.15 * h));
+                widgets::focus_ring(ui, &resp, r, 16.0);
+                icon_at(ui, r.center(), icon::X, 16.0, Color32::WHITE);
+                resp
+            } else {
+                icon_button(ui, icon::X, 16.0, crate::tr!("ui-close-queue"), false)
+            };
+            if close.clicked() {
+                app.queue_open = false;
+            }
+            // Left of Close, with more in the queue than the song playing.
+            if app.queue.tracks.len() > usize::from(app.queue.index.is_some()) && icon_button(ui, icon::TRASH_2, 15.0, crate::tr!("ui-clear-queue"), false).clicked() {
+                app.actions.push(Action::QueueClear);
+            }
+            // The heading last, in what's left: a long translation is cut short, not drawn under the buttons.
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let label = crate::tr!("ui-up-next");
+                let (label, size) = if q.queue_upper { (label.to_uppercase(), 13.0) } else { (label.to_owned(), 20.0) };
+                let font = theme::bold(size);
+                // Cut at its end, which in Arabic is its left: egui's own truncation keeps the end.
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ui.fonts_mut(|f| f.row_height(&font))), Sense::hover());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
+                text_at(ui, r.min, &label, font, if white_on_card { Color32::WHITE } else { theme::text() }, r.width());
+            });
+        });
+    });
     ui.add_space(8.0);
     queue_list(app, ui, "drawer");
+}
+
+/// "Play similar songs automatically". A long translation wraps: one wider than Up next
+/// would widen it past the window, and the page would take that overflow, over the drawer.
+fn autoplay_toggle(ui: &mut Ui, on: &mut bool, pad: f32, text: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(pad);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        ui.checkbox(on, egui::RichText::new(text).color(theme::text_dim())).on_hover_cursor(egui::CursorIcon::PointingHand);
+    });
 }
 
 /// "Playing from playlist", and its name, which opens it.
@@ -2035,10 +2054,7 @@ pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
     let start = app.queue.index.unwrap_or(0);
     // Above the list, so they stay in sight however far up it's scrolled.
     playing_from(app, ui);
-    ui.horizontal(|ui| {
-        ui.add_space(q.side_pad);
-        ui.checkbox(&mut app.autoplay, egui::RichText::new(crate::tr!("ui-auto-similar")).color(theme::text_dim())).on_hover_cursor(egui::CursorIcon::PointingHand);
-    });
+    autoplay_toggle(ui, &mut app.autoplay, q.side_pad, crate::tr!("ui-auto-similar"));
     ui.add_space(6.0);
     // A new current song (or a new queue) brings it back to the top of the list.
     let mut area = egui::ScrollArea::vertical().id_salt(("queue", salt)).auto_shrink(false);
@@ -2167,7 +2183,28 @@ pub fn toast(app: &mut App, ctx: &egui::Context, now: f64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BG_BRIGHTNESS, BG_SPEED, QUEUE_W, load_factor, load_queue_w};
+    use super::{BG_BRIGHTNESS, BG_SPEED, QUEUE_W, autoplay_toggle, load_factor, load_queue_w};
+
+    /// A long translation of the autoplay toggle stays inside Up next: wider, it would push
+    /// the drawer past the window and the page beside it into the drawer (#327).
+    #[test]
+    fn a_long_autoplay_toggle_keeps_the_page_out_of_up_next() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 600.0));
+        let page = std::cell::Cell::new(egui::Rect::NOTHING);
+        for _ in 0..2 {
+            let raw = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            ctx.run_ui(raw, |ui| {
+                egui::Panel::right("queue").resizable(false).exact_size(QUEUE_W.0).show(ui, |ui| {
+                    autoplay_toggle(ui, &mut true, 8.0, &"Reproducir canciones similares automáticamente ".repeat(3));
+                });
+                egui::CentralPanel::default().show(ui, |ui| page.set(ui.max_rect()));
+            })
+            .textures_delta
+            .clear();
+        }
+        assert!(page.get().right() <= screen.right() - QUEUE_W.0, "{:?}", page.get());
+    }
 
     /// Up next starts at its own width; saved, it stays between its narrowest and widest.
     #[test]

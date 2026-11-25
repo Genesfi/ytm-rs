@@ -28,17 +28,23 @@
 //! finds, and any other on request ([`Updater::notes`]), for the update dialog, the
 //! card shown after updating and Settings.
 //!
-//! Two channels: stable follows the latest published release; nightly also takes the
-//! prereleases built from main every night there are new changes (tagged
-//! `v<version>-nightly.<date>`, see the release workflow), whichever is newer. A nightly
-//! build knows it is one from `YTM_NIGHTLY`, set when it was built. Switching back to
-//! stable from a nightly installs the latest stable release, though its version is lower.
+//! Two channels, both picked from the list of releases: stable takes the newest
+//! published release; nightly also takes the prereleases built from main every night
+//! there are new changes (tagged `v<version>-nightly.<date>`, see the release workflow),
+//! whichever is newer. A nightly build knows it is one from `YTM_NIGHTLY`, set when it
+//! was built. Switching back to stable from a nightly installs the latest stable
+//! release, though its version is lower.
 //!
 //! Dev hooks: `YTM_UPDATE_FORCE=1` treats any build as installed; `YTM_UPDATE_AS=<ver>`
 //! pretends to be that version; `YTM_UPDATE_FLATPAK=1` (Linux) acts as a Flatpak;
 //! `YTM_UPDATE_DRYRUN=1` logs the install command
 //! instead of running it; `YTM_UPDATE_FEED=<url>` reads the release (or the list of
 //! releases) from there.
+//!
+//! GitHub's API allows 60 requests an hour without a token, shared by everyone on the
+//! same IP address (a VPN, a proxy, a carrier's NAT). `YTM_GITHUB_TOKEN` sends a token
+//! with them for 5,000 an hour ([`github_api`]); a check turned down for the limit
+//! tries again when it ends ([`State::RateLimited`]).
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
@@ -46,10 +52,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-const LATEST: &str = "https://api.github.com/repos/grapedjuice/ytm-rs/releases/latest";
 const ALL_RELEASES: &str = "https://api.github.com/repos/grapedjuice/ytm-rs/releases";
 const BY_TAG: &str = "https://api.github.com/repos/grapedjuice/ytm-rs/releases/tags/v";
 pub const RELEASES: &str = "https://github.com/grapedjuice/ytm-rs/releases";
@@ -78,6 +84,8 @@ pub enum State {
     /// Arch package, a Flatpak): `url` is its package (for a Flatpak, the release's page,
     /// unused).
     Available { version: String, url: String },
+    /// GitHub's API turned the check down for its rate limit, until then.
+    RateLimited { until: Instant },
     Failed(String),
 }
 
@@ -280,13 +288,18 @@ pub fn wait_for_predecessor() {
 /// Start `exe` once this process has exited: it waits for this one
 /// ([`wait_for_predecessor`]), so this process can take as long as it needs to close.
 pub fn start_after_exit(exe: &Path) -> bool {
+    start_after_exit_with_args(exe, &[])
+}
+
+/// Start again with extra arguments, after this process exits.
+pub fn start_after_exit_with_args(exe: &Path, args: &[&str]) -> bool {
     let after = format!("{AFTER_FLAG}{}", std::process::id());
     #[cfg(target_os = "macos")]
     if let Some(app) = bundle_of(exe) {
         // Through Launch Services; `-n` starts a new copy while this one is still up.
-        return spawn(Command::new("open").arg("-n").arg(app).arg("--args").arg(&after));
+        return spawn(Command::new("open").arg("-n").arg(app).arg("--args").arg(&after).args(args));
     }
-    spawn(Command::new(exe).arg(after))
+    spawn(Command::new(exe).arg(after).args(args))
 }
 
 /// Wait for process `pid` to exit, however long it takes: going ahead early would run
@@ -386,13 +399,21 @@ fn spawn(cmd: &mut Command) -> bool {
 /// `a` is newer than `b` (dotted numeric versions, a leading "v" ignored). A nightly
 /// (`0.2.34-nightly.20261110`) is built from main after that version's release, so it's
 /// newer than the release and older than the next one.
+///
+/// 2.0.x was a joke between 0.3.4 and 0.4.0, so it counts as 0.3.4.x: 2.0.2
+/// and the 2.0.3 that brings it back go on to 0.4.0, and nothing goes back to them.
+/// A real 2.0 would have to skip to 2.1.
 pub fn newer(a: &str, b: &str) -> bool {
     let nums = |s: &str| s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let base = |s: &str| match nums(s).as_slice() {
+        [2, 0, rest @ ..] => [0, 3, 4].iter().chain(rest).copied().collect(),
+        n => n.to_vec(),
+    };
     let parse = |v: &str| {
         let v = v.trim_start_matches('v');
         match v.split_once(NIGHTLY) {
-            Some((base, build)) => (nums(base), Some(nums(build))),
-            None => (nums(v), None),
+            Some((b, build)) => (base(b), Some(nums(build))),
+            None => (base(v), None),
         }
     };
     let cmp = |a: &[u64], b: &[u64]| {
@@ -485,7 +506,7 @@ impl Updater {
         std::thread::spawn(move || {
             let fetch = async {
                 let http = client()?;
-                let release: serde_json::Value = http.get(format!("{BY_TAG}{version}")).send().await?.error_for_status()?.json().await?;
+                let release: serde_json::Value = github_api(&http, &format!("{BY_TAG}{version}")).await?.json().await?;
                 anyhow::Ok(release["body"].as_str().map(str::to_owned))
             };
             let body = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -520,7 +541,7 @@ impl Updater {
                 let http = client()?;
                 let mut total = 0;
                 for page in 1.. {
-                    let releases: Vec<serde_json::Value> = http.get(format!("{ALL_RELEASES}?per_page=100&page={page}")).send().await?.error_for_status()?.json().await?;
+                    let releases: Vec<serde_json::Value> = github_api(&http, &format!("{ALL_RELEASES}?per_page=100&page={page}")).await?.json().await?;
                     total += releases.iter().flat_map(|r| r["assets"].as_array().into_iter().flatten()).filter_map(|a| a["download_count"].as_u64()).sum::<u64>();
                     if releases.len() < 100 {
                         break;
@@ -561,10 +582,16 @@ impl Updater {
                 }
                 match result {
                     Ok(s) => this.set(s),
-                    Err(e) => {
-                        log::warn!("update check failed: {e:#}");
-                        this.set(State::Failed(format!("{e:#}")));
-                    }
+                    Err(e) => match e.downcast_ref::<RateLimited>() {
+                        Some(&RateLimited(until)) => {
+                            log::warn!("update check: GitHub's rate limit, trying again in {}s", until.saturating_duration_since(Instant::now()).as_secs());
+                            this.set(State::RateLimited { until });
+                        }
+                        None => {
+                            log::warn!("update check failed: {e:#}");
+                            this.set(State::Failed(format!("{e:#}")));
+                        }
+                    },
                 }
                 break;
             }
@@ -573,9 +600,10 @@ impl Updater {
 
     async fn run(&self, nightly: bool) -> anyhow::Result<State> {
         let http = client()?;
-        // Nightlies are prereleases, which the latest release never is: they're in the list.
-        let feed = std::env::var("YTM_UPDATE_FEED").unwrap_or_else(|_| if nightly { format!("{ALL_RELEASES}?per_page=30") } else { LATEST.to_owned() });
-        let feed: serde_json::Value = http.get(feed).send().await?.error_for_status()?.json().await?;
+        // The list, on stable too: GitHub's latest release is the one copies before 2.0.3
+        // read, so it can stay the 2.0.3 that brings 2.0.2 back to 0.x while 0.x goes on.
+        let feed = std::env::var("YTM_UPDATE_FEED").unwrap_or_else(|_| format!("{ALL_RELEASES}?per_page=30"));
+        let feed: serde_json::Value = github_api(&http, &feed).await?.json().await?;
         let release = pick_release(feed, nightly).ok_or_else(|| anyhow::anyhow!("no releases found"))?;
         let tag = release["tag_name"].as_str().unwrap_or_default();
         if let Some(body) = release["body"].as_str() {
@@ -901,14 +929,95 @@ fn file_sha256(path: &Path) -> std::io::Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+/// GitHub's API turned a request down for its rate limit, until then.
+#[derive(Debug)]
+pub(crate) struct RateLimited(pub Instant);
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("GitHub's rate limit")
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
+/// A GitHub token for a higher API rate limit. Not `GITHUB_TOKEN`: plenty of people have
+/// one of those set for other tools, with more access than this needs.
+const TOKEN_VAR: &str = "YTM_GITHUB_TOKEN";
+
+/// GET `url`, with the token in `YTM_GITHUB_TOKEN` if it's for GitHub's API (never for a
+/// download or another feed). A refusal for the rate limit is a [`RateLimited`] error.
+pub(crate) async fn github_api(http: &reqwest::Client, url: &str) -> anyhow::Result<reqwest::Response> {
+    let token = std::env::var(TOKEN_VAR).ok().map(|t| t.trim().to_owned()).filter(|t| !t.is_empty() && url.starts_with("https://api.github.com/"));
+    let mut req = http.get(url).timeout(Duration::from_secs(60));
+    if let Some(t) = &token {
+        req = req.bearer_auth(t);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    if let Some(wait) = rate_limit_wait(status, resp.headers(), SystemTime::now()) {
+        return Err(RateLimited(Instant::now() + wait).into());
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED && token.is_some() {
+        anyhow::bail!("GitHub didn't accept the token in {TOKEN_VAR}");
+    }
+    // A secondary limit can come without its headers: the body says so.
+    if status == reqwest::StatusCode::FORBIDDEN {
+        if resp.text().await.unwrap_or_default().contains("rate limit") {
+            return Err(RateLimited(Instant::now() + Duration::from_secs(60)).into());
+        }
+        anyhow::bail!("{status} from {url}");
+    }
+    Ok(resp.error_for_status()?)
+}
+
+/// How long until a refusal for GitHub's rate limit ends, if this is one: `retry-after`
+/// for a secondary limit, else `x-ratelimit-reset` once `x-ratelimit-remaining` is 0,
+/// else a minute for a 429. Between a minute and an hour, whatever the clocks say.
+fn rate_limit_wait(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
+    if !matches!(status.as_u16(), 403 | 429) {
+        return None;
+    }
+    let num = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<u64>().ok();
+    let wait = match num("retry-after") {
+        Some(secs) => secs,
+        None if num("x-ratelimit-remaining") == Some(0) => {
+            num("x-ratelimit-reset").map_or(3600, |reset| reset.saturating_sub(now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()))
+        }
+        None if status == reqwest::StatusCode::TOO_MANY_REQUESTS => 60,
+        None => return None,
+    };
+    Some(Duration::from_secs(wait.clamp(60, 3600)))
+}
+
 fn client() -> anyhow::Result<reqwest::Client> {
     Ok(crate::proxy::apply(reqwest::Client::builder()).user_agent(concat!("ytm-rs/", env!("CARGO_PKG_VERSION"))).connect_timeout(std::time::Duration::from_secs(10)).read_timeout(std::time::Duration::from_secs(30)).build()?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_sha256, deb_version, file_sha256, in_flatpak, newer, pacman_package, pick_release, wanted};
+    use super::{asset_sha256, deb_version, file_sha256, in_flatpak, newer, pacman_package, pick_release, rate_limit_wait, wanted};
+    use reqwest::{StatusCode, header::HeaderMap};
     use serde_json::json;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn a_rate_limit_ends_when_github_says() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let headers = |pairs: &[(&'static str, &str)]| pairs.iter().map(|(k, v)| (reqwest::header::HeaderName::from_static(k), v.parse().unwrap())).collect::<HeaderMap>();
+        let end = |status, pairs: &[(&'static str, &str)]| rate_limit_wait(status, &headers(pairs), now).map(|d| d.as_secs());
+        let spent = [("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "1000600")];
+        assert_eq!(end(StatusCode::FORBIDDEN, &spent), Some(600));
+        assert_eq!(end(StatusCode::TOO_MANY_REQUESTS, &[("retry-after", "120")]), Some(120));
+        assert_eq!(end(StatusCode::TOO_MANY_REQUESTS, &[]), Some(60));
+        // A reset already past (a clock off), or far off, stays between a minute and an hour.
+        assert_eq!(end(StatusCode::FORBIDDEN, &[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "999000")]), Some(60));
+        assert_eq!(end(StatusCode::FORBIDDEN, &[("retry-after", "90000")]), Some(3600));
+        // Another 403, or requests left: not by the headers (the body may still say so).
+        assert_eq!(end(StatusCode::FORBIDDEN, &[]), None);
+        assert_eq!(end(StatusCode::FORBIDDEN, &[("x-ratelimit-remaining", "12")]), None);
+        assert_eq!(end(StatusCode::NOT_FOUND, &spent), None);
+    }
 
     #[test]
     fn a_download_is_checked_against_the_assets_hash() {

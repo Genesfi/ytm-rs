@@ -23,6 +23,7 @@ settings-clear = Clear
 ## Account
 
 settings-signed-in-desc = Signed in with Google. Your home feed, library and likes come from this account. Saved encrypted in Windows Credential Manager.
+settings-signed-in-desc-system = Signed in with Google. Your home feed, library and likes come from this account. Saved in the system's keyring, or, if it can't be used, in a file only you can read.
 settings-sign-out = Sign out
 settings-channel = Channel
 settings-channel-desc = Your Google account and each YouTube channel it manages have their own library, likes, history and recommendations.
@@ -100,7 +101,9 @@ settings-high-quality-audio = High quality audio
 settings-high-quality-audio-desc = 256 kbps instead of 128 kbps, for accounts with YouTube Premium. Applies from the next song.
 settings-output-device = Output device
 settings-output-device-desc = Where the music plays: this computer's speakers or headphones, or an AirPlay speaker on your network (with Settings › Network › Allow local network scan on). A picked device that isn't connected leaves it to Windows' default until it's back.
+settings-output-device-desc-system = Where the music plays: this computer's speakers or headphones, or an AirPlay speaker on your network (with Settings › Network › Allow local network scan on). A picked device that isn't connected leaves it to the system's default until it's back.
 settings-windows-default = Windows default
+settings-system-default = System default
 settings-not-connected = { $name } (not connected)
 settings-airplay-device = { $name } (AirPlay)
 settings-normalization-off-desc = Songs play as loud as they were made. Normal brings them all to the same level, and Quiet to the same, lower one.
@@ -161,6 +164,8 @@ settings-romanization-desc = Japanese, Korean, Chinese, Cyrillic and other scrip
 settings-translation = Translation
 settings-translation-desc = Translated by Unison, or Google when it can't. Lyrics that ship their own translation use it.
 settings-translate-into = Translate into
+settings-lyrics-look = Lyrics style
+settings-lyrics-look-desc = Another theme's lyrics, such as Spicy's, while the rest of the app keeps yours.
 settings-text-size = Text size
 settings-text-size-desc = Make the lyrics larger or smaller. Works on top of the theme's own size.
 settings-larger = Larger
@@ -225,8 +230,13 @@ settings-background-brightness = Background brightness
 settings-background-brightness-desc = Make the album art behind Now playing and the pages brighter or darker. 100% is the theme's own.
 settings-brighter = Brighter
 settings-darker = Darker
+settings-flat-background = Flat background
+settings-flat-background-desc = One colour behind the pages and Now playing, with no album art and no gradient.
+settings-flat-background-colour = Background colour
 settings-frosted-glass = Frosted glass
 settings-frosted-glass-desc = Menus and floating bars blur what's behind them, in themes that use it. Off, they're a little more solid.
+settings-classic-title-bar = Classic title bar
+settings-classic-title-bar-desc = The window buttons as they were before 2.0.2: square along the top right, instead of in a notch. Now playing's buttons and the account button go back beside them.
 settings-pulse-with-the-music = Pulse with the music
 settings-pulse-with-the-music-desc = The background swells with the beat, in themes whose background moves.
 settings-visualizer = Visualizer
@@ -256,6 +266,9 @@ settings-pill-mini-player = Pill mini player
 settings-keep-on-top = Keep on top
 settings-keep-on-top-desc = The mini player stays above other windows.
 settings-pill-mini-player-restart-desc = The mini player changes style from the next start.
+settings-keep-on-top-wayland = Keep on top on Wayland
+settings-keep-on-top-wayland-desc = Wayland doesn't let apps keep their window above others, so the app opens through XWayland instead. Touchpad scrolling doesn't coast there, and text can look softer with fractional scaling.
+settings-keep-on-top-wayland-restart-desc = The window changes from the next start.
 
 ## App icon
 
@@ -363,6 +376,7 @@ settings-address = Address
 settings-saved = Saved
 settings-save = Save
 settings-proxy-password-note = A password in the address is kept in Windows Credential Manager.
+settings-proxy-password-note-system = A password in the address is kept in the system's keyring, or, if it can't be used, in a file only you can read.
 settings-checking = Checking…
 settings-proxy-test-desc = Checks that YouTube Music answers through this setting.
 settings-test-connection = Test connection
@@ -387,6 +401,7 @@ settings-space = Space
 settings-next-previous-song = Next / previous song
 settings-ctrl = Ctrl
 settings-volume-up-down = Volume up / down
+settings-shortcut-seek = Back / forward 5 seconds in the song
 settings-shortcut-command-palette = Command palette: pages, settings, playlists and actions
 settings-search = Search
 settings-shortcut-find-in-list = Find in a song list
@@ -416,6 +431,10 @@ settings-update-downloading = Downloading { $version }… { $percent }%
 settings-update-ready = Version { $version } is ready. It installs when you close ytm-rs.
 settings-update-available = Version { $version } is out. { $step }
 settings-update-failed = Couldn't check for updates: { $error }
+settings-update-rate-limited = { $minutes ->
+    [one] GitHub is limiting update checks from your network. Try again in { $minutes } minute.
+   *[other] GitHub is limiting update checks from your network. Try again in { $minutes } minutes.
+}
 settings-version = Version { $version }.
 settings-automatic-updates-desc-packaged = Check for new versions and tell you when one is out.
 settings-automatic-updates-desc = Download new versions in the background and install them when you close the app.

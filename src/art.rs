@@ -183,7 +183,8 @@ fn lift(c: [f32; 3]) -> Color32 {
     Color32::from_rgb((c[0] * k).min(255.0) as u8, (c[1] * k).min(255.0) as u8, (c[2] * k).min(255.0) as u8)
 }
 
-/// A neutral backdrop for when nothing is playing.
+/// A neutral backdrop for when nothing is playing, with the accent and brightness the
+/// app starts with (a song without a cover takes them too).
 pub fn idle() -> Art {
     let n = SIZE as usize;
     let mut rgba = Vec::with_capacity(n * n * 4);
@@ -198,10 +199,10 @@ pub fn idle() -> Art {
     }
     Art {
         rgba,
-        accent: Color32::from_rgb(0xff, 0x4e, 0x6a),
+        accent: crate::theme::RED,
         album_accent: Color32::from_rgb(0xff, 0x4e, 0x6a),
         album_accent_comp: Color32::from_rgb(0x4e, 0xff, 0xe3),
-        brightness: 0.3,
+        brightness: 0.0,
     }
 }
 
