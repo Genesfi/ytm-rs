@@ -274,7 +274,7 @@ fn retime_settled(video_id: &str, wait: impl FnOnce()) -> bool {
 pub fn pick_folder(ctx: &egui::Context) {
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        if let Some(dir) = rfd::FileDialog::new().set_title("Download folder").set_directory(folder()).pick_folder() {
+        if let Some(dir) = rfd::FileDialog::new().set_title(crate::tr!("settings-download-folder")).set_directory(folder()).pick_folder() {
             set_folder(dir);
             ctx.request_repaint();
         }
@@ -1080,7 +1080,7 @@ mod tests {
     #[test]
     fn the_file_gets_the_chosen_sources_lyrics_as_set() {
         use crate::lyrics::{Line, Lyrics, Sync};
-        let lyrics = |provider, text: &str| Lyrics { lines: vec![Line { start: 2000, dur: 1000, text: text.into(), ..Default::default() }], sync: Sync::Line, provider, language: None, songwriters: vec![] };
+        let lyrics = |provider, text: &str| Lyrics { lines: vec![Line { start: 2000, dur: 1000, text: text.into(), ..Default::default() }], sync: Sync::Line, provider, language: None, songwriters: vec![], unison: None };
         let set = LyricsSet { sources: vec![lyrics(Provider::BLyricsRich, "first"), lyrics(Provider::LrclibSynced, "picked")] };
         let order: Vec<(Provider, bool)> = Provider::ALL.iter().map(|p| (*p, true)).collect();
         let pins = HashMap::from([("v".to_owned(), Provider::LrclibSynced)]);

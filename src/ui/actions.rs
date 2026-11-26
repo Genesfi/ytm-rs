@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::backend::{Req, UnlikeVersions};
+use crate::backend::{LinkUse, Req, UnlikeVersions};
+use crate::link::Link;
 use crate::model::{Target, Track};
 
 use super::lists::{self, LIBRARY_SONGS, LIKED_MUSIC};
@@ -104,6 +105,7 @@ impl App {
             Action::PlayCollection(Target::Album(id) | Target::Playlist(id), shuffle) if self.opened(&id).is_some() => self.play_opened(id, shuffle),
             Action::PlayCollection(target, shuffle) => {
                 self.toast(crate::tr!("status-starting-playback"));
+                self.drop_pending_play();
                 self.play_pending = Some((target.clone(), shuffle));
                 match target {
                     Target::Playlist(id) => self.load_list(&id, false, false),
@@ -124,7 +126,7 @@ impl App {
             }
             Action::Open(Target::Song(t)) | Action::Radio(t) => {
                 self.queue_source = None;
-                self.play_list(vec![t.clone()], 0);
+                self.play_for_radio(t.clone());
                 if !self.radio_pending {
                     self.radio_pending = true;
                     self.backend.request(Req::Radio { song_of: self.song_of(&t), seed: t.id, smart: false });
@@ -139,6 +141,7 @@ impl App {
                 self.loading = true;
                 self.backend.request(Req::FindArtist { name, video_id });
             }
+            Action::OpenLink(link, queue) => self.open_link(link, queue),
             Action::PlayNext(t) | Action::Enqueue(t) | Action::QueueInsert { track: t, .. } if self.explicit_hidden(&t) => {}
             Action::PlayNext(t) => {
                 let start = self.queue.play_next(t);
@@ -162,9 +165,10 @@ impl App {
                 if i >= self.queue.tracks.len() {
                     return;
                 }
-                self.play_pending = None;
+                self.drop_pending_play();
                 self.queue.index = Some(i);
                 self.queue.drop_explicit();
+                self.picked = true;
                 self.play_current();
             }
             Action::QueueRemove(i) => {
@@ -318,6 +322,7 @@ impl App {
                 self.backend.request(Req::DownloadMany { target, title, tracks, confirmed: false });
             }
             Action::CancelDownload(key) => self.backend.cancel_downloads(&key),
+            Action::KeepDownloaded(id, on) => self.keep_downloaded(&id, on),
             Action::AddToPlaylist(tracks) => {
                 if self.logged_in { self.dialog = Some(Dialog::PickPlaylist(tracks)); }
                 else { self.toast(crate::tr!("status-sign-in-edit")); }
@@ -448,6 +453,46 @@ impl App {
         let id = self.page_list().filter(|id| self.receiving(id))?;
         let o = self.opened(id).filter(|o| o.c.tracks.len() == tracks.len())?;
         Some(QueueFill { id: id.to_owned(), load: o.load, ran_out: false })
+    }
+
+    fn open_link(&mut self, link: Link, queue: bool) {
+        let known = self.link_preview.take().filter(|(l, _)| *l == link).and_then(|(_, song)| song.ok());
+        if crate::link::parse(&self.search_text).is_some() {
+            self.reset_search();
+        }
+        // Songs for the queue each go there; otherwise the newest link is the one that's wanted.
+        let queue = queue && matches!(link, Link::Song { .. });
+        if !queue {
+            self.link_pending = None;
+        }
+        match (&link, known) {
+            (Link::Page(target), _) => return self.apply(Action::Open(target.clone())),
+            (Link::Jam(code), _) => return jam::open_link(self, code.clone()),
+            (Link::Song { .. }, Some(t)) if queue => return self.apply(Action::Enqueue(t)),
+            (Link::Song { list: None, .. }, Some(t)) => return self.play_linked(t),
+            (Link::Song { .. }, _) if queue => return self.backend.request(Req::Link { link, to: LinkUse::Queue }),
+            (Link::Song { list, .. }, _) => {
+                // A whole playlist takes a moment.
+                if list.is_some() {
+                    self.toast(crate::tr!("status-starting-playback"));
+                }
+                self.drop_pending_play();
+            }
+            (Link::Resolve(_), _) => {}
+        }
+        self.link_pending = Some(link.clone());
+        self.backend.request(Req::Link { link, to: LinkUse::Open });
+    }
+
+    /// The song of a link: as from its card, but one that's on and paused goes on too.
+    pub(super) fn play_linked(&mut self, t: Track) {
+        let hidden = self.hide_explicit && t.explicit;
+        let paused = !hidden && !self.playing() && !self.jam.guest() && [self.current_id(), self.playing_id()].contains(&Some(t.id.as_str()));
+        self.drop_pending_play();
+        self.apply(Action::Open(Target::Song(t)));
+        if paused {
+            self.toggle();
+        }
     }
 
     pub(super) fn shortcuts(&mut self, ctx: &egui::Context) {

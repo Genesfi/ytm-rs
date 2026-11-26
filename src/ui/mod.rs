@@ -31,6 +31,7 @@ mod playback;
 mod queue;
 mod ratings;
 mod responses;
+mod resume;
 mod row_drag;
 mod seek_wheel;
 mod shell;
@@ -58,6 +59,7 @@ use souvlaki::MediaControlEvent;
 
 use crate::audio::{AudioEvent, AudioHandle};
 use crate::backend::{ArtistPage, Backend, Explore, Library, Req, Resp, SearchResults};
+use crate::link::Link;
 use crate::lyrics::LyricsSet;
 use crate::media::Media;
 use crate::model::{Card, Chip, Shelf, Target, Track};
@@ -242,6 +244,8 @@ pub enum Action {
     /// Click on a card: songs start a radio, everything else opens its page.
     Open(Target),
     FindArtist { name: String, video_id: Option<String> },
+    /// A pasted link: a song plays (with true, it goes to the queue's end), the rest opens.
+    OpenLink(Link, bool),
     PlayNext(Track),
     Enqueue(Track),
     Radio(Track),
@@ -291,6 +295,8 @@ pub enum Action {
     DownloadMany(Option<Target>, String, Option<Vec<Track>>),
     /// Stop a download of many songs, by its `DownloadRun::key`.
     CancelDownload(String),
+    /// Keep a playlist downloaded (its songs, and those that join it), or stop.
+    KeepDownloaded(String, bool),
     NewPlaylist(Vec<Track>),
     EditPlaylist,
     /// Save one of your playlist's sort orders to it: (playlist id, what to send).
@@ -468,6 +474,10 @@ pub struct App {
     /// Asked to play (shuffled?) before its songs are here: a playlist's first page, or
     /// an album's or artist's songs (`Req::PlayCollection`).
     play_pending: Option<(Target, bool)>,
+    /// The last link to play or open whose answer (`Req::Link`) isn't here yet.
+    link_pending: Option<Link>,
+    /// The last song link in the search box that was looked up: its song, or why there's none.
+    link_preview: Option<(Link, Result<Track, String>)>,
     bg: Option<Background>,
 
     // navigation
@@ -548,10 +558,15 @@ pub struct App {
     /// Files chosen in the upload dialog, handed over from its thread.
     picked_uploads: Arc<std::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
     liked: HashSet<String>,
-    /// Settings › Downloads › Download liked songs, and the liked songs queued for it
-    /// since launch (each once, so one that can't be downloaded doesn't fail on every load).
+    /// Settings › Downloads › Download liked songs: Liked Music kept downloaded.
     download_liked: bool,
-    liked_queued: HashSet<String>,
+    /// The other playlists kept downloaded (their page's More › Keep downloaded): songs
+    /// that join them are downloaded too.
+    kept_downloaded: Vec<String>,
+    /// The songs queued since launch for each list kept downloaded, by (list, song): each
+    /// once, so one that can't be downloaded doesn't fail on every load, and a song one
+    /// list didn't download (its large download declined) still goes for another.
+    kept_queued: HashSet<(String, String)>,
     ratings: ratings::Ratings,
     rating_settings: ratings::Settings,
     pub blocklist: blocklist::Blocklist,
@@ -571,6 +586,14 @@ pub struct App {
     pinned: Vec<String>,
 
     // playback
+    /// Where long tracks (podcast episodes, mixes) were left, to pick up from there.
+    resume: resume::Points,
+    /// The track playing, once it has started, for where it's left to be noted when another starts.
+    left_from: Option<String>,
+    /// The track about to start was picked (clicked, a list played, one jumped to in the
+    /// queue), rather than come to by Next, the queue running on or radio: only then
+    /// does a long one pick up where it was left.
+    picked: bool,
     queue: Queue,
     generation: u64,
     /// Monotonic counter for assigning play and staged-gapless generation numbers without collisions.
@@ -593,7 +616,7 @@ pub struct App {
     skip_silence: bool,
     high_quality: bool,
     backup_stream: bool,
-    /// Settings › Network › Allow local network scan, which AirPlay speakers need.
+    /// Settings › Playback › Find speakers on your network, which network speakers need.
     local_network: bool,
     backup_prompt: BackupPrompt,
     reveal_backup_setting: bool,
@@ -640,9 +663,10 @@ pub struct App {
     /// Songs' music videos, for the Song/Video switch: looked up once each (`None`: it has
     /// none, or the answer hasn't come yet).
     music_videos: std::collections::HashMap<String, Option<crate::ytm::MusicVideo>>,
-    /// The output device picked in settings (cpal's id and its name, for when it's not
-    /// connected), and the devices last listed there.
-    output_device: Option<(String, String)>,
+    /// Where the music plays ("Play on"), and its name, for when it's not there; and the
+    /// sound cards last listed there.
+    destination: crate::destination::Destination,
+    destination_name: String,
     output_devices: Vec<crate::audio::OutputDevice>,
     /// The language picked in Settings (`None`: the system's), saved; this run shows
     /// [`crate::i18n::current`] until the next start.
@@ -1009,6 +1033,8 @@ impl App {
             queue_source: None,
             played_title: None,
             play_pending: None,
+            link_pending: None,
+            link_preview: None,
             bg,
             page: Page::Home,
             start_page: start_choice,
@@ -1052,7 +1078,8 @@ impl App {
             picked_uploads: Default::default(),
             liked: HashSet::new(),
             download_liked: get("download_liked").is_some_and(|v| v == "1"),
-            liked_queued: HashSet::new(),
+            kept_downloaded: get("kept_downloaded").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+            kept_queued: HashSet::new(),
             ratings: Default::default(),
             rating_settings: ratings::Settings::load(get),
             blocklist: blocklist::Blocklist::load(get),
@@ -1065,6 +1092,9 @@ impl App {
             switching_to: None,
             sidebar_cache: None,
             pinned: get("pinned_playlists").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+            resume: get("resume_points").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+            left_from: None,
+            picked: false,
             queue: Queue::new(match get("repeat").as_deref() {
                 Some("all") => Repeat::All,
                 Some("one") => Repeat::One,
@@ -1108,7 +1138,8 @@ impl App {
             locale,
             playing_as: None,
             music_videos: Default::default(),
-            output_device: get("output_device").filter(|d| !d.is_empty()).map(|id| (id, get("output_device_name").unwrap_or_default())),
+            destination: crate::destination::Destination::parse(&get("output_device").unwrap_or_default()),
+            destination_name: get("output_device_name").unwrap_or_default(),
             output_devices: Vec::new(),
             language,
             updater: None,
@@ -1285,6 +1316,7 @@ impl App {
         app.find.hide_explicit = hide_explicit;
         app.find.sorts = get("list_sorts").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
         app.request_liked(false);
+        app.load_kept_downloaded();
         // Settings › Open on: in place, not a visit (nothing to go back to), and without
         // the page transition.
         if start != Page::Home {
@@ -1381,6 +1413,11 @@ impl App {
         app.audio.set_skip_silence(app.skip_silence);
         app.set_eq();
         app.audio.set_stereo(app.stereo);
+        // The saved repeat goes out now, not on the first frame: a widget can ask as soon
+        // as the name appears.
+        if let Some(m) = &mut app.media {
+            m.sync_modes(app.queue.shuffled(), app.queue.repeat);
+        }
         app
     }
 
@@ -1453,6 +1490,16 @@ impl App {
         self.page_changed = changed;
     }
 
+    /// The search box holds the query of the search page you're on, and is empty elsewhere.
+    fn reset_search(&mut self) {
+        self.search_text = match &self.page {
+            Page::Search(q) => q.clone(),
+            _ => String::new(),
+        };
+        self.suggestions = Default::default();
+        self.suggest_sel = None;
+    }
+
     /// Start the page transition and (re)load the page's data. Every page refreshes on
     /// each visit (things change outside the app: likes, other devices, new releases),
     /// showing the cached copy meanwhile.
@@ -1461,13 +1508,9 @@ impl App {
         // A page asked for afresh checks whether it's back soon again.
         self.online_check = None;
         self.online_wait = ONLINE_WAIT_FIRST;
-        // The search box holds the query of the search page you're on, and is empty elsewhere.
-        self.search_text = match &self.page {
-            Page::Search(q) => q.clone(),
-            _ => String::new(),
-        };
-        self.suggestions = Default::default();
-        self.suggest_sel = None;
+        self.reset_search();
+        // A page still looked up from a link isn't the newest place to go any more.
+        self.link_pending.take_if(|l| matches!(l, Link::Resolve(_)));
         self.settings_query.clear();
         // Choosing a transfer match lasts while searching; any other page ends it.
         if !matches!(self.page, Page::Search(_)) {
@@ -1788,6 +1831,7 @@ impl eframe::App for App {
             if let Some(wait) = m.sync_volume(self.audio.volume()) {
                 ctx.request_repaint_after(wait);
             }
+            m.sync_modes(self.queue.shuffled(), self.queue.repeat);
         }
         // No sleep while playing, and the screen stays on for a video on show: this song's
         // (picture in picture keeps the last one's player for a song after it).
@@ -2341,9 +2385,8 @@ impl eframe::App for App {
         storage.set_string("download_dir", if folder == crate::downloads::default_folder() { String::new() } else { folder.display().to_string() });
         storage.set_string("download_folder_per_list", b(crate::downloads::per_list()));
         storage.set_string("download_lyrics", crate::downloads::file_lyrics().key().to_owned());
-        let (device, device_name) = self.output_device.clone().unzip();
-        storage.set_string("output_device", device.unwrap_or_default());
-        storage.set_string("output_device_name", device_name.unwrap_or_default());
+        storage.set_string("output_device", self.destination.key());
+        storage.set_string("output_device_name", self.destination_name.clone());
         storage.set_string("language", self.language.clone().unwrap_or_default());
         storage.set_string("auto_update", b(self.auto_update));
         storage.set_string("update_channel", if self.update_nightly { "nightly" } else { "stable" }.to_owned());
@@ -2414,6 +2457,7 @@ impl eframe::App for App {
         storage.set_string("time_left", b(self.time_left));
         storage.set_string("sponsorblock", b(self.sponsorblock));
         storage.set_string("download_liked", b(self.download_liked));
+        storage.set_string("kept_downloaded", serde_json::to_string(&self.kept_downloaded).unwrap_or_default());
         storage.set_string("gapless", b(self.gapless));
         storage.set_string("crossfade", b(self.crossfade));
         storage.set_string("crossfade_secs", self.crossfade_secs.to_string());
@@ -2436,10 +2480,15 @@ impl eframe::App for App {
         }
         storage.set_string("np_art", b(self.np_tab == NpTab::Art));
         storage.set_string("wrapped_style", self.stats.style.key().to_owned());
-        // Background test runs leave the user's real "last song" alone unless asked.
+        // Background test runs leave the user's real "last song" alone unless asked, and
+        // where long tracks were left.
         let test_run = std::env::var_os("YTM_BACKGROUND").is_some() && std::env::var_os("YTM_SAVE_SESSION").is_none();
         if let Some(s) = self.session_json().filter(|_| !test_run) {
             storage.set_string(SESSION_KEY, s);
+        }
+        if !test_run {
+            self.note_where_left();
+            storage.set_string("resume_points", serde_json::to_string(&self.resume).unwrap_or_default());
         }
     }
 

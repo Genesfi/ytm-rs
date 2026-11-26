@@ -4,7 +4,8 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use super::widgets::{self, icon_at, icon_button, named, paint_cover, text_at};
 use super::{Action, App, LibTab, NpTab, Page, Repeat, fmt_time, row_drag};
-use crate::model::Target;
+use crate::link::{self, Link};
+use crate::model::{Card, Target};
 use crate::shader::Params;
 use crate::theme::{self, icon};
 
@@ -583,7 +584,18 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                     text_at(ui, pos2(img.right() + 10.0, rect.top() + 7.0), &c.title, theme::semibold(13.5), theme::with_alpha(theme::text(), a), w);
                     text_at(ui, pos2(img.right() + 10.0, rect.top() + 26.0), &c.subtitle, theme::regular(12.0), theme::with_alpha(theme::text_dim(), a), w);
                 }
-                if resp.clicked() {
+                // The first click opens it; a double click plays it too, as its menu's Play does.
+                // Only if the first click was on it: the list can change between the two. The
+                // one playing goes on (or out of pause), rather than starting over.
+                let first = egui::Id::unique("sidebar-first-click");
+                if resp.double_clicked() && ui.data(|d| d.get_temp::<Target>(first)).as_ref() == Some(&c.target) {
+                    match widgets::active_state(ui, &c.target) {
+                        Some(true) => {}
+                        Some(false) => app.actions.push(Action::TogglePlay),
+                        None => app.actions.push(Action::PlayCollection(c.target.clone(), false)),
+                    }
+                } else if resp.clicked() {
+                    ui.data_mut(|d| d.insert_temp(first, c.target.clone()));
                     app.actions.push(Action::Open(c.target.clone()));
                 }
             }
@@ -839,6 +851,10 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
                 }
             });
         }
+        // A link pasted in takes the box, rather than join what's in it.
+        if app.search_focused && ui.input(|i| link::pasted(&i.events).is_some()) {
+            app.search_text.clear();
+        }
         let edit = ui.put(
             inner,
             egui::TextEdit::singleline(&mut app.search_text)
@@ -905,6 +921,10 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
             if let Some(target) = hit {
                 app.suggestions = Default::default();
                 app.actions.push(Action::Open(target));
+            } else if let Some(link) = link::parse(&q) {
+                // As it was with Enter, not since.
+                let shift = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if modifiers.shift)));
+                app.actions.push(Action::OpenLink(link, shift));
             } else if !q.is_empty() {
                 app.suggestions = Default::default();
                 app.actions.push(Action::Go(Page::Search(q)));
@@ -992,6 +1012,10 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                     if app.forget_held {
                         app.search_refocus = true;
                     }
+                    if let Some(link) = link::parse(&app.search_text) {
+                        link_row(ui, app, link);
+                        return;
+                    }
                     let now = ui.input(|i| i.time);
                     let mut picked = false;
                     for (i, s) in app.suggestions.1.clone().into_iter().enumerate() {
@@ -1074,7 +1098,63 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
 
 /// Whether the dropdown has anything to show.
 fn suggesting_any(app: &App) -> bool {
-    !app.suggestions.1.is_empty() || !app.suggestions.2.is_empty()
+    !app.suggestions.1.is_empty() || !app.suggestions.2.is_empty() || link::parse(&app.search_text).is_some()
+}
+
+/// In place of suggestions, what Enter does with a link in the search box.
+fn link_row(ui: &mut Ui, app: &mut App, link: Link) {
+    let hint = crate::tr!("link-queue-hint");
+    let item_radius = app.look().app.search_look.item_radius;
+    let resp = match app.link_preview.as_ref().filter(|(l, _)| *l == link).map(|(_, song)| song.as_ref()) {
+        Some(Ok(t)) if !(app.hide_explicit && t.explicit) => {
+            let c = Card { title: t.title.clone(), subtitle: String::new(), thumbs: t.thumbs.clone(), target: Target::Song(t.clone()), round: false, links: Vec::new() };
+            hit_row(ui, item_radius, &c, &format!("{} • {hint}", t.artist_line()), true)
+        }
+        // Not looked up yet, or nothing to show for it.
+        preview => {
+            let (glyph, label) = match &link {
+                Link::Song { .. } | Link::Page(Target::Song(_)) => (icon::MUSIC, crate::tr!("link-play-song")),
+                Link::Page(Target::Album(_)) => (icon::DISC_3, crate::tr!("link-open-album")),
+                Link::Page(Target::Playlist(_)) => (icon::LIST_MUSIC, crate::tr!("link-open-playlist")),
+                Link::Page(Target::Artist(_)) => (icon::USER, crate::tr!("link-open-artist")),
+                Link::Resolve(_) => (icon::LINK, crate::tr!("link-open")),
+                Link::Jam(_) => (icon::USERS, crate::tr!("nav-listen-together")),
+            };
+            let line = matches!(link, Link::Song { .. }).then(|| preview.and_then(Result::err).map_or(hint, String::as_str));
+            // With a line under it, as tall as with its song.
+            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if line.is_some() { 56.0 } else { 40.0 }), Sense::click());
+            ui.painter().rect_filled(r, item_radius, theme::glass(0.08));
+            icon_at(ui, pos2(r.left() + 20.0, r.center().y), glyph, 15.0, theme::text_dim());
+            let (x, width) = (r.left() + 42.0, r.width() - 52.0);
+            text_at(ui, pos2(x, r.center().y - if line.is_some() { 19.0 } else { 9.0 }), label, theme::semibold(15.0), theme::text(), width);
+            if let Some(line) = line {
+                text_at(ui, pos2(x, r.center().y + 3.0), line, theme::regular(13.0), theme::text_dim(), width);
+            }
+            named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand)
+        }
+    };
+    // Pointer-down, as for the terms: the text box loses focus (hiding this) first.
+    if resp.is_pointer_button_down_on() || resp.clicked() {
+        app.search_focused = false;
+        app.actions.push(Action::OpenLink(link, ui.input(|i| i.modifiers.shift)));
+    }
+}
+
+/// A row of the dropdown: a card's art and title, with `line` under it.
+fn hit_row(ui: &mut Ui, item_radius: f32, c: &Card, line: &str, lit: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::click());
+    let resp = named(resp, &c.title).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.contains_pointer() || lit, 0.1);
+    ui.painter().rect_filled(r, item_radius, theme::glass(0.08 * h));
+    let art = Rect::from_center_size(pos2(r.left() + 30.0, r.center().y), Vec2::splat(40.0));
+    let radius = if c.round { 20.0 } else { theme::thumb_radius().min(6.0) };
+    paint_cover(ui, art, &c.thumbs, radius, 1.0);
+    let x = art.right() + 12.0;
+    let width = r.right() - x - 12.0;
+    let explicit = matches!(&c.target, Target::Song(t) if t.explicit);
+    widgets::title_at(ui, pos2(x, r.center().y - 19.0), &c.title, explicit, theme::semibold(14.5), theme::text(), width);
+    text_at(ui, pos2(x, r.center().y + 2.0), line, theme::regular(13.0), theme::text_dim(), width);
+    resp
 }
 
 /// Under the search terms, the songs, videos, artists and albums the typed words most
@@ -1092,18 +1172,7 @@ fn suggested_hits(ui: &mut Ui, app: &mut App) {
         ui.painter().hline(r.x_range().shrink(12.0), r.center().y, egui::Stroke::new(1.0, theme::glass(0.08)));
     }
     for (j, c) in hits.into_iter().enumerate() {
-        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::click());
-        let resp = named(resp, &c.title).on_hover_cursor(egui::CursorIcon::PointingHand);
-        let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.contains_pointer() || app.suggest_sel == Some(first + j), 0.1);
-        ui.painter().rect_filled(r, item_radius, theme::glass(0.08 * h));
-        let art = Rect::from_center_size(pos2(r.left() + 30.0, r.center().y), Vec2::splat(40.0));
-        let radius = if c.round { 20.0 } else { theme::thumb_radius().min(6.0) };
-        paint_cover(ui, art, &c.thumbs, radius, 1.0);
-        let x = art.right() + 12.0;
-        let width = r.right() - x - 12.0;
-        let explicit = matches!(&c.target, Target::Song(t) if t.explicit);
-        widgets::title_at(ui, pos2(x, r.center().y - 19.0), &c.title, explicit, theme::semibold(14.5), theme::text(), width);
-        text_at(ui, pos2(x, r.center().y + 2.0), &hit_line(&c), theme::regular(13.0), theme::text_dim(), width);
+        let resp = hit_row(ui, item_radius, &c, &hit_line(&c), app.suggest_sel == Some(first + j));
         // Pointer-down, as for the terms: the text box loses focus (hiding this) first.
         if resp.is_pointer_button_down_on() || resp.clicked() {
             app.suggestions = Default::default();
@@ -1816,12 +1885,35 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
             app.actions.push(Action::OpenNowPlaying(true));
         }
     }
-    // Where the music plays: lit while that's an AirPlay speaker.
-    let on_airplay = app.output_device.as_ref().is_some_and(|(id, _)| id.starts_with(crate::airplay::PREFIX));
-    let out = right_btn(ui, icon::MONITOR_SPEAKER, crate::tr!("settings-output-device"), on_airplay);
+    // Where the music plays: network speakers' kind, its name saying which, lit only while
+    // the music goes (or is on its way) to them. Not found yet, or let go of while nothing
+    // plays, they're only what's picked.
+    let kind = app.destination.kind();
+    let mut lit = false;
+    let name = match kind {
+        None => crate::tr!("settings-output-device").to_owned(),
+        Some(_) => {
+            use crate::audio::RemoteState;
+            let to = super::pages::destination_label(app);
+            let to = to.as_str();
+            match app.audio.remote_state() {
+                RemoteState::Connecting => {
+                    lit = true;
+                    crate::tr!("settings-connecting-to", name = to).to_owned()
+                }
+                RemoteState::Playing => {
+                    lit = true;
+                    crate::tr!("settings-playing-on", name = to).to_owned()
+                }
+                RemoteState::Failed(_) => crate::tr!("settings-couldnt-play-on", name = to).to_owned(),
+                RemoteState::Idle => format!("{}: {to}", crate::tr!("settings-output-device")),
+            }
+        }
+    };
+    let out = right_btn(ui, kind.map_or(icon::MONITOR_SPEAKER, crate::destination::Kind::icon), &name, lit);
+    let opened = out.clicked();
     let popup = widgets::menu_popup(&out).align(egui::RectAlign::TOP_END).align_alternatives(&[egui::RectAlign::BOTTOM_END]);
-    // Found on the network in the background, so read afresh each frame.
-    super::pages::output_device_menu(app, &out, popup, 300.0, &crate::airplay::speakers());
+    super::pages::play_on_menu(app, opened, popup, 320.0);
     if app.tempo_on {
         tempo_button(app, ui, Rect::from_center_size(pos2(rx - 20.0, cy), vec2(40.0, 18.0 * bar_scale + 16.0)), bar_rest, accent, dot_floor);
         rx -= 44.0;
@@ -2002,6 +2094,10 @@ pub fn queue_drawer(app: &mut App, ui: &mut Ui) {
             // Left of Close, with more in the queue than the song playing.
             if app.queue.tracks.len() > usize::from(app.queue.index.is_some()) && icon_button(ui, icon::TRASH_2, 15.0, crate::tr!("ui-clear-queue"), false).clicked() {
                 app.actions.push(Action::QueueClear);
+            }
+            // Left of Clear queue, signed in: all of it into a new playlist or one of yours.
+            if app.logged_in && !app.queue.tracks.is_empty() && icon_button(ui, icon::LIST_PLUS, 15.0, crate::tr!("ui-save-queue"), false).clicked() {
+                app.actions.push(Action::AddToPlaylist(app.queue.songs_once()));
             }
             // The heading last, in what's left: a long translation is cut short, not drawn under the buttons.
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
