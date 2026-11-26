@@ -2630,7 +2630,8 @@ impl Backend {
             Err(e) if needs_account(&e) => {
                 log::info!("{video_id} needs a signed-in player ({e:#})");
                 let session = self.api.account().ok_or_else(|| anyhow::anyhow!("sign in to play this song"))?;
-                if self.is_premium(&session).await {
+                let is_premium = self.is_premium(&session).await;
+                if is_premium {
                     match self.resolve_from(Source::WebMusic, video_id, !best).await {
                         Ok(s) => return Ok((Source::WebMusic, s)),
                         Err(e) => log::warn!("web music player failed ({e:#}); using yt-dlp"),
@@ -2642,14 +2643,34 @@ impl Backend {
                     return Ok((Source::Feed, s));
                 }
                 let blocked = bot_check(&e);
-                if !best && self.backup_stream.load(Ordering::Relaxed) && blocked {
+                let try_safari_first = !best && self.backup_stream.load(Ordering::Relaxed) && blocked;
+                if try_safari_first {
                     match self.resolve_from(Source::SafariHls, video_id, false).await {
                         Ok(s) => return Ok((Source::SafariHls, s)),
                         Err(e) => log::warn!("Safari HLS failed for {video_id} ({e:#}); trying the file stream"),
                     }
                 }
                 let source = if blocked { Source::YtDlpAfterBotCheck } else { Source::YtDlp };
-                Ok((source, self.resolve_from(source, video_id, false).await?))
+                match self.resolve_from(source, video_id, false).await {
+                    Ok(s) => Ok((source, s)),
+                    Err(ytdlp_err) => {
+                        if !best && !try_safari_first {
+                            log::warn!("{video_id}: yt-dlp failed ({ytdlp_err:#}); trying Safari HLS fallback");
+                            match self.resolve_from(Source::SafariHls, video_id, false).await {
+                                Ok(s) => return Ok((Source::SafariHls, s)),
+                                Err(hls_err) => log::warn!("{video_id}: Safari HLS fallback failed ({hls_err:#})"),
+                            }
+                        }
+                        if !is_premium {
+                            log::warn!("{video_id}: trying signed-in web player fallback");
+                            match self.resolve_from(Source::WebMusic, video_id, !best).await {
+                                Ok(s) => return Ok((Source::WebMusic, s)),
+                                Err(web_err) => log::warn!("{video_id}: web music player fallback failed ({web_err:#})"),
+                            }
+                        }
+                        Err(ytdlp_err)
+                    }
+                }
             }
             // visionOS answers the same for a video that's gone, one blocked where the
             // user is (#373), and an episode of a podcast added by RSS. The signed-in web
