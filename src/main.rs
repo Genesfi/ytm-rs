@@ -41,6 +41,7 @@ mod model;
 mod node;
 mod notify;
 mod opus;
+mod potoken;
 mod preset;
 mod recognize;
 mod remote;
@@ -97,7 +98,7 @@ fn main() -> eframe::Result {
     // Child-process modes for the webview windows (see login.rs / turnstile.rs).
     let mut args = std::env::args_os().skip(1);
     if let (Some(flag), Some(dir)) = (args.next(), args.next()) {
-        if flag == login::FLAG || flag == login::SPOTIFY_FLAG || flag == turnstile::FLAG {
+        if flag == login::FLAG || flag == login::SPOTIFY_FLAG || flag == turnstile::FLAG || flag == potoken::FLAG {
             // The parent hands its proxy setting down through the environment.
             proxy::init(std::path::Path::new(""));
             let language = args.next().and_then(|arg| arg.into_string().ok());
@@ -113,6 +114,10 @@ fn main() -> eframe::Result {
         }
         if flag == turnstile::FLAG {
             turnstile::child_main(dir.into());
+            return Ok(());
+        }
+        if flag == potoken::FLAG {
+            potoken::child_main(dir.into());
             return Ok(());
         }
     }

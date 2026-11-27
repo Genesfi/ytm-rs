@@ -941,6 +941,8 @@ pub struct Backend {
     /// (repeat one, restart) doesn't download it again.
     current: StreamSlot,
     jsc: Arc<jsc::Solver>,
+    /// On-demand BotGuard PO Token minter (hidden WebView2, only live during bot checks).
+    potoken: Arc<crate::potoken::PoTokenClient>,
     /// Whether the signed-in account has Premium; checked once per sign-in. A failed
     /// check is retried no sooner than `PREMIUM_RETRY` later.
     premium: Arc<tokio::sync::Mutex<Result<bool, Option<std::time::Instant>>>>,
@@ -980,13 +982,14 @@ impl Backend {
         let lyrics = Arc::new(lyrics::Client::new(http.clone(), &data_dir));
         let translate = Arc::new(crate::translate::Client::new(http, &data_dir));
         let jsc = Arc::new(jsc::Solver::new(&data_dir));
+        let potoken = Arc::new(crate::potoken::PoTokenClient::new(&data_dir));
         let api = Arc::new(ytmapi::Api::new(&data_dir));
         if crate::proxy::needs_relay()
             && let Err(e) = rt.block_on(crate::proxy::start_relay())
         {
             log::warn!("proxy relay: {e:#}");
         }
-        let backend = Self { rt: Arc::new(rt), api, tx, audio, wake, prefetched: Default::default(), staged: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default(), backup_stream: Default::default(), clean: Default::default(), visionos_hls: Default::default(), songs: Default::default(), batch: Default::default() };
+        let backend = Self { rt: Arc::new(rt), api, tx, audio, wake, prefetched: Default::default(), staged: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, potoken, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default(), backup_stream: Default::default(), clean: Default::default(), visionos_hls: Default::default(), songs: Default::default(), batch: Default::default() };
         backend.keep_signed_in();
         Ok(backend)
     }
@@ -2618,14 +2621,20 @@ impl Backend {
         // Downloads stay on the file stream: they're saved as the .m4a it is.
         if !best && self.visionos_hls.load(Ordering::Relaxed) {
             match self.resolve_from(Source::VisionOsHls, video_id, false).await {
-                Ok(s) => return Ok((Source::VisionOsHls, s)),
+                Ok(s) => {
+                    self.potoken.close_if_running();
+                    return Ok((Source::VisionOsHls, s));
+                }
                 // The signed-in paths below take it.
                 Err(e) if needs_account(&e) => {}
                 Err(e) => log::warn!("HLS stream failed for {video_id} ({e:#}); trying the file stream"),
             }
         }
         match self.resolve_from(Source::VisionOs, video_id, !best).await {
-            Ok(s) => Ok((Source::VisionOs, s)),
+            Ok(s) => {
+                self.potoken.close_if_running();
+                Ok((Source::VisionOs, s))
+            }
             // Age-restricted or Premium-only: only signed-in web players get it.
             Err(e) if needs_account(&e) => {
                 log::info!("{video_id} needs a signed-in player ({e:#})");
@@ -2643,6 +2652,12 @@ impl Backend {
                     return Ok((Source::Feed, s));
                 }
                 let blocked = bot_check(&e);
+                if !is_premium {
+                    match self.resolve_from(Source::WebMusic, video_id, !best).await {
+                        Ok(s) => return Ok((Source::WebMusic, s)),
+                        Err(web_err) => log::warn!("{video_id}: WebMusic + PO token failed ({web_err:#}); falling back"),
+                    }
+                }
                 let try_safari_first = !best && self.backup_stream.load(Ordering::Relaxed) && blocked;
                 if try_safari_first {
                     match self.resolve_from(Source::SafariHls, video_id, false).await {
@@ -2659,13 +2674,6 @@ impl Backend {
                             match self.resolve_from(Source::SafariHls, video_id, false).await {
                                 Ok(s) => return Ok((Source::SafariHls, s)),
                                 Err(hls_err) => log::warn!("{video_id}: Safari HLS fallback failed ({hls_err:#})"),
-                            }
-                        }
-                        if !is_premium {
-                            log::warn!("{video_id}: trying signed-in web player fallback");
-                            match self.resolve_from(Source::WebMusic, video_id, !best).await {
-                                Ok(s) => return Ok((Source::WebMusic, s)),
-                                Err(web_err) => log::warn!("{video_id}: web music player fallback failed ({web_err:#})"),
                             }
                         }
                         Err(ytdlp_err)
@@ -2742,7 +2750,19 @@ impl Backend {
             }
             Source::WebMusic => {
                 let session = self.api.account().ok_or_else(|| anyhow::anyhow!("signed out"))?;
-                match session.audio_stream(&self.http(), &self.jsc, video_id, opus).await? {
+                let pot = if !self.is_premium(&session).await {
+                    let vd = self.api.visitor_data(false).await?;
+                    let tok = self.potoken.mint(&vd, video_id).await?;
+                    Some((vd, tok))
+                } else {
+                    None
+                };
+                let pt = pot.as_ref().map(|(vd, tok)| webmusic::PoToken {
+                    visitor_data: vd,
+                    player: &tok.player,
+                    stream: &tok.stream,
+                });
+                match session.audio_stream(&self.http(), &self.jsc, video_id, opus, pt.as_ref()).await? {
                     webmusic::Audio::YouTube(s) => plain(s, webmusic::UA),
                     webmusic::Audio::Feed(feed) => self.feed_stream(feed).await?,
                 }

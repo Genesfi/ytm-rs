@@ -351,8 +351,8 @@ impl Session {
 
     /// The web player's answer for `video_id`, if it's playable. `sts`: the player
     /// script's signature timestamp, see [`player_body`].
-    async fn player(&self, http: &reqwest::Client, video_id: &str, sts: u32) -> anyhow::Result<Value> {
-        let resp = self.post(http, "https://music.youtube.com", "player", ("67", VERSION, UA), player_body(video_id, sts)).await?;
+    async fn player(&self, http: &reqwest::Client, video_id: &str, sts: u32, po_token: Option<&PoToken<'_>>) -> anyhow::Result<Value> {
+        let resp = self.post(http, "https://music.youtube.com", "player", ("67", VERSION, UA), player_body(video_id, sts, po_token)).await?;
         let status = &resp["playabilityStatus"];
         if status["status"] != "OK" {
             return Err(crate::innertube::Refused {
@@ -372,13 +372,13 @@ impl Session {
     /// the solver's own time limit, and a failure isn't retried for 10 minutes.
     pub async fn feed(&self, http: &reqwest::Client, solver: &Solver, video_id: &str) -> anyhow::Result<Option<Feed>> {
         let player = solver.player(http).await?;
-        feed_of(&self.player(http, video_id, player.sts).await?)
+        feed_of(&self.player(http, video_id, player.sts, None).await?)
     }
 
     /// `opus`: Premium's Opus (774) first; otherwise AAC, which downloads save as .m4a.
-    pub async fn audio_stream(&self, http: &reqwest::Client, solver: &Solver, video_id: &str, opus: bool) -> anyhow::Result<Audio> {
+    pub async fn audio_stream(&self, http: &reqwest::Client, solver: &Solver, video_id: &str, opus: bool, po_token: Option<&PoToken<'_>>) -> anyhow::Result<Audio> {
         let player = solver.player(http).await?;
-        let resp = self.player(http, video_id, player.sts).await?;
+        let resp = self.player(http, video_id, player.sts, po_token).await?;
         if let Some(feed) = feed_of(&resp)? {
             return Ok(Audio::Feed(feed));
         }
@@ -411,9 +411,21 @@ impl Session {
         if let (Some(sig), Some((_, sp))) = (sig_out, cipher) {
             pairs.push((sp, sig));
         }
+        if let Some(pt) = po_token
+            && !pt.stream.is_empty()
+        {
+            pairs.retain(|(k, _)| k != "pot");
+            pairs.push(("pot".into(), pt.stream.to_owned()));
+        }
         url.query_pairs_mut().clear().extend_pairs(pairs);
         Ok(Audio::YouTube(Stream { url: url.into(), size, duration_ms, loudness_db, opus: is_opus(f) }))
     }
+}
+
+pub struct PoToken<'a> {
+    pub visitor_data: &'a str,
+    pub player: &'a str,
+    pub stream: &'a str,
 }
 
 pub enum Audio {
@@ -432,15 +444,27 @@ pub struct Feed {
 /// The web player's request for `video_id`. Without `sts` (the player script's
 /// signature timestamp) it answers "UNPLAYABLE: The page needs to be reloaded", for an
 /// episode of a podcast added by RSS too.
-fn player_body(video_id: &str, sts: u32) -> Value {
-    json!({
+fn player_body(video_id: &str, sts: u32, po_token: Option<&PoToken<'_>>) -> Value {
+    let mut client = json!({"clientName": "WEB_REMIX", "clientVersion": VERSION, "hl": ENGLISH.hl, "gl": ENGLISH.gl});
+    if let Some(pt) = po_token
+        && !pt.visitor_data.is_empty()
+    {
+        client["visitorData"] = Value::String(pt.visitor_data.to_owned());
+    }
+    let mut body = json!({
         // English: why it can't play is matched as English text (`ui::responses`).
-        "context": {"client": {"clientName": "WEB_REMIX", "clientVersion": VERSION, "hl": ENGLISH.hl, "gl": ENGLISH.gl}},
+        "context": {"client": client},
         "videoId": video_id,
         "playbackContext": {"contentPlaybackContext": {"html5Preference": "HTML5_PREF_WANTS", "signatureTimestamp": sts}},
         "contentCheckOk": true,
         "racyCheckOk": true,
-    })
+    });
+    if let Some(pt) = po_token
+        && !pt.player.is_empty()
+    {
+        body["serviceIntegrityDimensions"] = json!({"poToken": pt.player});
+    }
+    body
 }
 
 /// The web player's `isExternallyHostedPodcast`: its one progressive format is the
@@ -496,10 +520,15 @@ mod tests {
     #[test]
     fn the_player_is_asked_with_the_signature_timestamp() {
         // An RSS episode's lookup too: without it, "The page needs to be reloaded".
-        let body = player_body("M77cW_SUPm4", 20412);
+        let body = player_body("M77cW_SUPm4", 20412, None);
         assert_eq!(body["videoId"], "M77cW_SUPm4");
         assert_eq!(body["playbackContext"]["contentPlaybackContext"]["signatureTimestamp"], 20412);
         assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
+
+        let pt = PoToken { visitor_data: "Cgt2aXNpdG9y", player: "player-pot", stream: "stream-pot" };
+        let with_pot = player_body("M77cW_SUPm4", 20412, Some(&pt));
+        assert_eq!(with_pot["context"]["client"]["visitorData"], "Cgt2aXNpdG9y");
+        assert_eq!(with_pot["serviceIntegrityDimensions"]["poToken"], "player-pot");
     }
 
     #[test]
