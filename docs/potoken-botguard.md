@@ -34,7 +34,7 @@ BotGuard memeriksa lingkungan DOM/browser penuh (`window`, `document`, `navigato
    - Header:
      - `Accept: application/json`
      - `Content-Type: application/json+protobuf`
-     - `x-goog-api-key: AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw`
+     - `x-goog-api-key`: public BotGuard client key (lihat `GOOGLE_API_KEY` di `src/potoken.rs`)
      - `x-user-agent: grpc-web-javascript/0.1`
    - Body: `["O43z0dpjhgX20SCx4KAo"]`
 3. Jalankan `runBotGuard(parsedChallengeData)` di JS WebView:
