@@ -162,17 +162,24 @@ pub struct VideoStream {
 
 /// The best of `formats` at most `max_height` tall. Of two as tall, the lower frame rate:
 /// a 60 fps video takes twice the decoding, which 720p already can't keep up with.
-fn pick_video(formats: &[Value], max_height: u64) -> Option<VideoStream> {
-    let range = |v: &Value| Some((v["start"].as_str()?.parse().ok()?, v["end"].as_str()?.parse().ok()?));
+pub(crate) fn pick_video_format(formats: &[Value], max_height: u64) -> Option<&Value> {
     formats
         .iter()
         .filter(|f| f["mimeType"].as_str().is_some_and(|m| m.starts_with("video/mp4") && m.contains("avc1")))
         .filter(|f| f["height"].as_u64().is_some_and(|h| h <= max_height))
         .max_by_key(|f| (f["height"].as_u64(), std::cmp::Reverse(f["fps"].as_u64())))
-        .and_then(|f| {
-            let (_, init_end) = range(&f["initRange"])?;
-            Some(VideoStream { url: f["url"].as_str()?.to_owned(), width: f["width"].as_u64()? as u32, height: f["height"].as_u64()? as u32, init_end, index: range(&f["indexRange"])? })
-        })
+}
+
+/// Builds a [`VideoStream`] from a chosen adaptive format and a resolved download URL.
+pub(crate) fn video_from_format(f: &Value, url: String) -> Option<VideoStream> {
+    let range = |v: &Value| Some((v["start"].as_str()?.parse().ok()?, v["end"].as_str()?.parse().ok()?));
+    let (_, init_end) = range(&f["initRange"])?;
+    Some(VideoStream { url, width: f["width"].as_u64()? as u32, height: f["height"].as_u64()? as u32, init_end, index: range(&f["indexRange"])? })
+}
+
+fn pick_video(formats: &[Value], max_height: u64) -> Option<VideoStream> {
+    let f = pick_video_format(formats, max_height)?;
+    video_from_format(f, f["url"].as_str()?.to_owned())
 }
 
 pub async fn video_stream(http: &reqwest::Client, video_id: &str, visitor_data: &str, max_height: u64) -> anyhow::Result<VideoStream> {

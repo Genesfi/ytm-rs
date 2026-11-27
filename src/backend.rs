@@ -1430,7 +1430,7 @@ impl Backend {
                     }
                 },
                 Req::VideoStream { video_id, max_height } => {
-                    let found = async { innertube::video_stream(&self.http(), &video_id, &api.visitor_data(false).await?, max_height.into()).await }.await;
+                    let found = self.resolve_video_stream(&video_id, max_height.into()).await;
                     if let Err(e) = &found {
                         log::warn!("video of {video_id}: {e:#}");
                     }
@@ -2750,13 +2750,7 @@ impl Backend {
             }
             Source::WebMusic => {
                 let session = self.api.account().ok_or_else(|| anyhow::anyhow!("signed out"))?;
-                let pot = if !self.is_premium(&session).await {
-                    let vd = self.api.visitor_data(false).await?;
-                    let tok = self.potoken.mint(&vd, video_id).await?;
-                    Some((vd, tok))
-                } else {
-                    None
-                };
+                let pot = self.webmusic_po_token(&session, video_id).await?;
                 let pt = pot.as_ref().map(|(vd, tok)| webmusic::PoToken {
                     visitor_data: vd,
                     player: &tok.player,
@@ -2860,6 +2854,41 @@ impl Backend {
                 let vd = self.api.visitor_data(true).await?;
                 innertube::hls_audio(&self.http(), video_id, &vd).await
             }
+        }
+    }
+
+    /// Mints an on-demand BotGuard PO Token for non-Premium `WebMusic` requests.
+    async fn webmusic_po_token(&self, session: &webmusic::Session, video_id: &str) -> anyhow::Result<Option<(String, crate::potoken::PoTokens)>> {
+        if self.is_premium(session).await {
+            return Ok(None);
+        }
+        let vd = self.api.visitor_data(false).await?;
+        let tok = self.potoken.mint(&vd, video_id).await?;
+        Ok(Some((vd, tok)))
+    }
+
+    /// Resolves an H.264 video stream from VisionOS, falling back to `WebMusic` + PO Token
+    /// when VisionOS is blocked (`LOGIN_REQUIRED` / signed-in required).
+    async fn resolve_video_stream(&self, video_id: &str, max_height: u64) -> anyhow::Result<innertube::VideoStream> {
+        let vd = self.api.visitor_data(false).await?;
+        match innertube::video_stream(&self.http(), video_id, &vd, max_height).await {
+            Ok(s) => {
+                self.potoken.close_if_running();
+                Ok(s)
+            }
+            Err(e) if needs_account(&e) => {
+                let Some(session) = self.api.account() else {
+                    return Err(e);
+                };
+                let pot = self.webmusic_po_token(&session, video_id).await?;
+                let pt = pot.as_ref().map(|(vd, tok)| webmusic::PoToken {
+                    visitor_data: vd,
+                    player: &tok.player,
+                    stream: &tok.stream,
+                });
+                session.video_stream(&self.http(), &self.jsc, video_id, max_height, pt.as_ref()).await
+            }
+            Err(e) => Err(e),
         }
     }
 

@@ -388,38 +388,53 @@ impl Session {
         let size = f["contentLength"].as_str().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow::anyhow!("unknown stream size"))?;
         let duration_ms = f["approxDurationMs"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0);
         let loudness_db = crate::innertube::loudness(&resp, f);
-
-        // Either a plain URL, or `signatureCipher` = s=<challenge>&sp=<param>&url=<url>.
-        let (raw, cipher) = match f["url"].as_str() {
-            Some(u) => (u.to_owned(), None),
-            None => {
-                let c = f["signatureCipher"].as_str().ok_or_else(|| anyhow::anyhow!("format has no URL"))?;
-                let q: Vec<(String, String)> = Url::parse(&format!("http://x/?{c}"))?.query_pairs().into_owned().collect();
-                let get = |k: &str| q.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
-                let url = get("url").ok_or_else(|| anyhow::anyhow!("cipher has no url"))?;
-                let s = get("s").ok_or_else(|| anyhow::anyhow!("cipher has no signature"))?;
-                (url, Some((s, get("sp").unwrap_or_else(|| "signature".into()))))
-            }
-        };
-        let mut url = Url::parse(&raw)?;
-        let mut pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
-        let n = pairs.iter().find(|(k, _)| k == "n").map(|(_, v)| v.clone());
-        let (n_out, sig_out) = solver.solve(&player, n, cipher.as_ref().map(|(s, _)| s.clone())).await?;
-        if let Some(n) = n_out {
-            pairs.iter_mut().filter(|(k, _)| k == "n").for_each(|(_, v)| *v = n.clone());
-        }
-        if let (Some(sig), Some((_, sp))) = (sig_out, cipher) {
-            pairs.push((sp, sig));
-        }
-        if let Some(pt) = po_token
-            && !pt.stream.is_empty()
-        {
-            pairs.retain(|(k, _)| k != "pot");
-            pairs.push(("pot".into(), pt.stream.to_owned()));
-        }
-        url.query_pairs_mut().clear().extend_pairs(pairs);
-        Ok(Audio::YouTube(Stream { url: url.into(), size, duration_ms, loudness_db, opus: is_opus(f) }))
+        let url = resolve_format_url(solver, &player, f, po_token).await?;
+        Ok(Audio::YouTube(Stream { url, size, duration_ms, loudness_db, opus: is_opus(f) }))
     }
+
+    /// Resolves an H.264 fragmented-MP4 video stream from the signed-in web player.
+    pub async fn video_stream(&self, http: &reqwest::Client, solver: &Solver, video_id: &str, max_height: u64, po_token: Option<&PoToken<'_>>) -> anyhow::Result<crate::innertube::VideoStream> {
+        let player = solver.player(http).await?;
+        let resp = self.player(http, video_id, player.sts, po_token).await?;
+        let formats = resp["streamingData"]["adaptiveFormats"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let f = crate::innertube::pick_video_format(formats, max_height).ok_or_else(|| anyhow::anyhow!("no H.264 video in web player response"))?;
+        log::info!("web music video: {video_id} itag {} ({}p)", f["itag"], f["height"].as_u64().unwrap_or(0));
+        let url = resolve_format_url(solver, &player, f, po_token).await?;
+        crate::innertube::video_from_format(f, url).ok_or_else(|| anyhow::anyhow!("incomplete H.264 video format in web player response"))
+    }
+}
+
+async fn resolve_format_url(solver: &Solver, player: &crate::jsc::Player, f: &Value, po_token: Option<&PoToken<'_>>) -> anyhow::Result<String> {
+    // Either a plain URL, or `signatureCipher` = s=<challenge>&sp=<param>&url=<url>.
+    let (raw, cipher) = match f["url"].as_str() {
+        Some(u) => (u.to_owned(), None),
+        None => {
+            let c = f["signatureCipher"].as_str().ok_or_else(|| anyhow::anyhow!("format has no URL"))?;
+            let q: Vec<(String, String)> = Url::parse(&format!("http://x/?{c}"))?.query_pairs().into_owned().collect();
+            let get = |k: &str| q.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+            let url = get("url").ok_or_else(|| anyhow::anyhow!("cipher has no url"))?;
+            let s = get("s").ok_or_else(|| anyhow::anyhow!("cipher has no signature"))?;
+            (url, Some((s, get("sp").unwrap_or_else(|| "signature".into()))))
+        }
+    };
+    let mut url = Url::parse(&raw)?;
+    let mut pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+    let n = pairs.iter().find(|(k, _)| k == "n").map(|(_, v)| v.clone());
+    let (n_out, sig_out) = solver.solve(player, n, cipher.as_ref().map(|(s, _)| s.clone())).await?;
+    if let Some(n) = n_out {
+        pairs.iter_mut().filter(|(k, _)| k == "n").for_each(|(_, v)| *v = n.clone());
+    }
+    if let (Some(sig), Some((_, sp))) = (sig_out, cipher) {
+        pairs.push((sp, sig));
+    }
+    if let Some(pt) = po_token
+        && !pt.stream.is_empty()
+    {
+        pairs.retain(|(k, _)| k != "pot");
+        pairs.push(("pot".into(), pt.stream.to_owned()));
+    }
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    Ok(url.into())
 }
 
 pub struct PoToken<'a> {
